@@ -1,0 +1,46 @@
+{
+  "dataset": "ChEMBL 36",
+  "epochs": 5,
+  "featurizer": "BRICS-atomic",
+  "zinc256k": false,
+  "max_atoms": 60,
+  "model_name": "ChEMBL_Pretrain_GNN",
+  "objective": "multi-task RDKit descriptor regression",
+  "descriptors": [
+    "MolLogP",
+    "TPSA",
+    "MolWt",
+    "NumHDonors",
+    "NumHAcceptors",
+    "QED",
+    "NumRings",
+    "NumAromaticRings"
+  ],
+  "target_mean": [
+    3.254343032836914,
+    82.01333618164062,
+    388.56536865234375,
+    1.7862800359725952,
+    4.6528801918029785,
+    0.5210544466972351,
+    3.118000030517578,
+    2.217439889907837
+  ],
+  "target_std": [
+    2.182915449142456,
+    46.56203842163086,
+    127.53903198242188,
+    1.6254546642303467,
+    2.2525928020477295,
+    0.22473366558551788,
+    1.4104986190795898,
+    1.2428343296051025
+  ],
+  "transfer_layers": [
+    "node_embed",
+    "gcn_proj_1",
+    "ln1",
+    "node_proj",
+    "ln2"
+  ]
+}

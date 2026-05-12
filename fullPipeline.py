@@ -20,14 +20,32 @@ Architecture Overview
 """
 
 # ─── Imports ────────────────────────────────────────────────────────────────
-import os, math, json, warnings
+import os, math, json, warnings, logging, argparse
 import concurrent.futures
-warnings.filterwarnings("ignore")
+
+# Suppress all warnings properly
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'      # TensorFlow warnings
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+warnings.filterwarnings('ignore')              # Python warnings
+logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 import numpy as np
+import pandas as pd
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, Model
+
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    for gpu in gpus:
+        tf.config.experimental.set_memory_growth(gpu, True)
+    print(f"[GPU] {len(gpus)} GPU(s) détecté(s) : {[g.name for g in gpus]}")
+else:
+    print("[GPU] Aucun GPU détecté — entraînement sur CPU.")
+
+# Supprimer les warnings RDKit
+from rdkit import RDLogger
+RDLogger.DisableLog('rdApp.*')
 import tensorflow_probability as tfp
 
 # Load SMILES data
@@ -77,7 +95,8 @@ HP = dict(
 
     # VAE
     latent_dim      = 128,
-    vae_beta        = 1.0,
+    vae_beta        = 2.0,
+    vae_free_bits   = 0.5,
 
     # GNN
     gnn_layers      = 3,
@@ -91,6 +110,7 @@ HP = dict(
     # RL (Drug Generation)
     rl_gamma        = 0.99,
     rl_episodes     = 100,
+    ppo_kl_beta     = 0.005,
     max_smiles_len  = 40,
     vocab_size      = 60,    # SMILES char vocabulary
 )
@@ -256,7 +276,10 @@ class UnifiedOmicsVAE(Model):
         mu, log_var   = self.encode(gex, mut, cnv, training)
         z             = self.reparameterize(mu, log_var)
         recon         = self.decode(z, training)
-        kl_loss = -0.5 * tf.reduce_mean(1 + log_var - tf.square(mu) - tf.exp(log_var))
+        kl_per_dim = -0.5 * (1 + log_var - tf.square(mu) - tf.exp(log_var))
+        if HP['vae_free_bits'] > 0.0:
+            kl_per_dim = tf.maximum(kl_per_dim, HP['vae_free_bits'])
+        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_per_dim, axis=-1))
         return z, recon, kl_loss
 
 
@@ -302,24 +325,38 @@ class GATLayer(layers.Layer):
 
 class MolecularGNNEncoder(Model):
     """
-    Multi-layer GAT encoder on the atom-level feature matrix.
-    Global attentive pooling → fixed-size Drug Embedding D.
+    Pre-trained GNN encoder from ChEMBL (multi-layer GCN with normalization).
+    Outputs node-level embeddings for Bi-Int.
     """
     def __init__(self, out_dim=HP['drug_node_dim'], **kwargs):
         super().__init__(**kwargs)
-        self.input_proj = layers.Dense(128, activation='gelu')
-        self.gat_layers = [GATLayer(128) for _ in range(HP['gnn_layers'])]
-        self.pool_attn  = layers.Dense(1)       # attentive pooling
-        self.out_proj   = layers.Dense(out_dim)
+        # Pre-trained layers from ChEMBL
+        self.node_embed = layers.Dense(64, activation='relu', name='node_embed')
+        self.graph_conv_1 = layers.Lambda(
+            lambda inputs: tf.matmul(inputs[0], inputs[1]), name='graph_conv_1')
+        self.gcn_proj_1 = layers.Dense(64, activation='relu', name='gcn_proj_1')
+        self.ln1 = layers.LayerNormalization(name='ln1')
+        self.graph_conv_2 = layers.Lambda(
+            lambda inputs: tf.matmul(inputs[0], inputs[1]), name='graph_conv_2')
+        self.node_proj = layers.Dense(128, activation='relu', name='node_proj')
+        self.ln2 = layers.LayerNormalization(name='ln2')
+        # Output projection to match out_dim
+        self.out_proj = layers.Dense(out_dim)
 
     def call(self, atom_feat, adj_mask=None, training=False):
         """
         atom_feat : [B, MAX_ATOMS, atom_feat_dim]
         Returns   : [B, MAX_ATOMS, out_dim]  — node-level drug embeddings D
         """
-        x = self.input_proj(atom_feat)
-        for gat in self.gat_layers:
-            x = gat(x, adj_mask, training=training)
+        x = self.node_embed(atom_feat)
+        if adj_mask is not None:
+            agg1 = self.graph_conv_1([adj_mask, x])
+            x = self.gcn_proj_1(agg1)
+        x = self.ln1(x)
+        if adj_mask is not None:
+            agg2 = self.graph_conv_2([adj_mask, x])
+            x = self.node_proj(agg2)
+        x = self.ln2(x)
         node_embeddings = self.out_proj(x)        # [B, N, out_dim]
         return node_embeddings                    # keep node-level for Bi-Int
 
@@ -638,10 +675,14 @@ class SMILESVocabulary:
         return np.array(results)
 
     def decode(self, idxs) -> str:
+        """Decode token indices to SMILES string, skipping invalid tokens."""
         chars = []
         for i in idxs:
-            if i == 1: break  # EOS
-            if i > 1: chars.append(self.idx2char.get(i, '?'))
+            i_int = int(i)  # Handle TensorFlow integers
+            if i_int == 1: break  # EOS
+            if i_int > 1 and i_int in self.idx2char:  # Only use valid tokens
+                chars.append(self.idx2char[i_int])
+            # Skip index 0 (PAD) and unknown indices silently
         return ''.join(chars)
 
     def batch_decode(self, idxs_list, max_workers=None) -> list:
@@ -709,25 +750,34 @@ class DrugGeneratorPolicy(Model):
         return logits, value, [h1, c1, h2, c2]
 
     def generate(self, z, max_len=HP['max_smiles_len'], temperature=1.0, step=0, total_steps=100, vocab_size=None):
-        """Autoregressive SMILES sampling with annealed temperature."""
-        # Annealed temperature: high at start (exploration), low at end (exploitation)
-        annealed_temp = temperature * (0.1 + 0.9 * (1 - step / max(max(total_steps, 1), 1)))
+        """Autoregressive SMILES sampling with strong token constraints."""
+        annealed_temp = 1.0
         B = tf.shape(z)[0]
-        token = tf.fill([B, 1], 2)   # start with 'C'
+        token = tf.fill([B, 1], 2)   # start with 'C' (index 2)
         generated = [token]
         states = None
         
         for i in range(max_len):
             logits, _, states = self(token, z, states, training=False, conditional=True)
-            logits = logits[:, -1, :] / annealed_temp
+            logits = logits[:, -1, :] / annealed_temp  # [B, vocab_size]
+            
+            # Strong masking: only allow valid tokens
+            # PAD=0, EOS=1, then valid SMILES chars from index 2 onward
             if i == 0:
+                # First token: MUST be 'C' (index 2), or allow other organic atoms
+                # Mask PAD (0) and EOS (1)
                 logits = tf.concat([tf.fill([B, 2], -1e9), logits[:, 2:]], axis=-1)
             else:
+                # Mid-sequence: allow most tokens but penalize PAD
                 logits = tf.concat([tf.fill([B, 1], -1e9), logits[:, 1:]], axis=-1)
+            
             token = tf.random.categorical(logits, 1, dtype=tf.int32)
             generated.append(token)
-            if tf.reduce_all(token == 1):   # all EOS
+            
+            # Stop if all sequences hit EOS
+            if tf.reduce_all(token == 1):
                 break
+        
         return tf.concat(generated, axis=1)
 
 
@@ -749,9 +799,11 @@ class PPODrugGenerator:
         # PPO hyperparams
         self.clip_eps     = 0.2
         self.vf_coef      = 0.5
-        self.entropy_coef  = 0.01
+        self.entropy_coef  = 0.08
         self.gae_lambda   = 0.95
         self.gamma        = hp['rl_gamma']
+        self.kl_coef      = hp.get('ppo_kl_beta', 0.005)
+        self.reference_policy = None
 
     def pretrain_on_valid_smiles(self, smiles_list: list, z: tf.Tensor, epochs=20):
         """Supervised pre-training on valid SMILES to warm-start the policy."""
@@ -784,23 +836,103 @@ class PPODrugGenerator:
             
             if epoch % 5 == 0 or epoch == 0:
                 print(f"  PreTrain Epoch {epoch+1}/{epochs} | Loss: {loss_sum:.4f}")
+        self.reference_policy = DrugGeneratorPolicy(vocab_size=self.policy.embed.input_dim)
+        dummy_tokens = tf.zeros([1, HP['max_smiles_len'] + 1], dtype=tf.int32)
+        dummy_z = tf.zeros([1, HP['latent_dim']], dtype=tf.float32)
+        _ = self.reference_policy(dummy_tokens, dummy_z, training=False, conditional=True)
+        self.reference_policy.set_weights(self.policy.get_weights())
 
-    def compute_reward(self, smiles_batch: list, z_batch, gex, mut, cnv) -> np.ndarray:
+    def compute_reward(self, smiles_batch: list, z_batch, gex, mut, cnv, episode: int = 0, total_episodes: int = 200) -> np.ndarray:
         """
-        Reward = +1 for valid SMILES, -1 for invalid.
-        Focus on validity first.
+        Graduated reward system with bootstrap learning and curriculum scaling.
+        Early episodes: generous rewards to learn valid SMILES structure.
+        Late episodes: strict drug-likeness penalties.
         """
+        from rdkit import Chem
+        from rdkit.Chem import QED, Descriptors, rdMolDescriptors
+        from rdkit import RDLogger
+        RDLogger.DisableLog('rdApp.*')
+        
+        # Curriculum: early episodes generous, late episodes strict
+        curriculum_phase = min(1.0, episode / (total_episodes * 0.3))  # transition over first 30%
+        reward_scale = 1.0 + 2.0 * curriculum_phase  # 1.0 → 3.0
+        
         rewards = []
         for smiles in smiles_batch:
-            if HAS_RDKIT:
-                mol = Chem.MolFromSmiles(smiles)
-                if mol is not None:
-                    rewards.append(1.0)  # Positive reward for valid SMILES
-                else:
-                    rewards.append(-1.0)  # Negative for invalid
-            else:
-                # Fallback: assume valid if no RDKit
-                rewards.append(1.0)
+            # Nettoyer le SMILES
+            smiles = smiles.strip().lstrip('?')
+            
+            # Trop court ou trop long
+            if len(smiles) < 5:
+                rewards.append(-0.5)
+                continue
+            if len(smiles) > 120:
+                rewards.append(-0.3)
+                continue
+            
+            mol = Chem.MolFromSmiles(smiles)
+            if mol is None:
+                rewards.append(-1.0)  # hard penalty for invalid
+                continue
+            
+            try:
+                qed  = QED.qed(mol)
+                mw   = Descriptors.MolWt(mol)
+                logp = Descriptors.MolLogP(mol)
+                hbd  = rdMolDescriptors.CalcNumHBD(mol)   # H-bond donors
+                hba  = rdMolDescriptors.CalcNumHBA(mol)   # H-bond acceptors
+                rings = rdMolDescriptors.CalcNumRings(mol)
+                
+                # ✅ Bootstrap reward: any valid molecule gets positive signal
+                reward = 0.2
+                
+                # In early episodes, lenient; in late episodes, strict
+                if curriculum_phase > 0.5:  # After 30% of training
+                    # ── Pénalités dures (strict phase) ───────────────────────────────────
+                    if mw > 600:    
+                        rewards.append(-0.5)
+                        continue
+                    if logp > 7:    
+                        rewards.append(-0.4)
+                        continue
+                    if logp < -3:   
+                        rewards.append(-0.3)
+                        continue
+                    if rings == 0:  
+                        rewards.append(-0.3)  # Penalize linear alkanes
+                        continue
+                    if hbd > 5:     
+                        rewards.append(-0.2)
+                        continue
+                    if hba > 10:    
+                        rewards.append(-0.2)
+                        continue
+                
+                # ── Score positif ─────────────────────────────────────
+                reward = qed * 2.0            # base : 0 → 2.0
+                reward += 0.5                 # validity bonus
+
+                # Bonus Lipinski strict
+                if mw < 500:    reward += 0.3
+                if 0 < logp < 5: reward += 0.3
+                if hbd <= 5:    reward += 0.1
+                if hba <= 10:   reward += 0.1
+                
+                # Bonus structure drug-like
+                if rings >= 1:  reward += 0.3  # encourage cycles
+                if rings >= 2:  reward += 0.2  # encourage bicycles
+                
+                # Bonus LogP optimal (zone drug-like)
+                if 1.0 < logp < 3.5: reward += 0.2
+                
+                # Apply curriculum scaling
+                reward *= reward_scale
+                
+                rewards.append(float(reward))
+                
+            except Exception:
+                rewards.append(-0.1)
+        
         return np.array(rewards, dtype=np.float32)
 
     def _ppo_update(self, token_seqs, old_log_probs, advantages, returns, z):
@@ -817,26 +949,52 @@ class PPODrugGenerator:
 
             vf_loss     = tf.reduce_mean(tf.square(tf.reduce_mean(values, axis=1) - returns))
             entropy     = tf.reduce_mean(dist.entropy())
+            entropy_loss = self.entropy_coef * tf.maximum(entropy, 0.1)  # entropy floor to prevent collapse
+            kl_penalty  = tf.reduce_mean(new_log_probs - old_log_probs)
 
-            total_loss  = policy_loss + self.vf_coef * vf_loss - self.entropy_coef * entropy
+            total_loss  = policy_loss + self.vf_coef * vf_loss - entropy_loss + self.kl_coef * kl_penalty
 
         grads = tape.gradient(total_loss, self.policy.trainable_variables)
-        self.opt.apply_gradients(zip(grads, self.policy.trainable_variables))
-        return total_loss.numpy(), entropy.numpy()
+        # FIX: Filter out None gradients (disconnected variables like dense_96)
+        grads_and_vars = [
+            (g, v) for g, v in zip(grads, self.policy.trainable_variables)
+            if g is not None
+        ]
+        if grads_and_vars:  # Only apply if there are valid gradients
+            self.opt.apply_gradients(grads_and_vars)
+        return total_loss.numpy(), entropy.numpy(), float(policy_loss.numpy()), float(vf_loss.numpy()), float(kl_penalty.numpy()), float(tf.reduce_mean(new_log_probs - old_log_probs).numpy())
 
     def train_episode(self, z, gex, mut, cnv, n_samples=64, episode=1, total_episodes=100):
         """One PPO episode: sample SMILES → compute rewards → update policy."""
-        # Sample with annealed temperature
-        token_ids   = self.policy.generate(z[:n_samples], step=episode, total_steps=total_episodes)    # [n, max_len]
+        # Sample with annealed temperature from the current policy
+        token_ids   = self.policy.generate(z[:n_samples], step=episode, total_steps=total_episodes)
+        logits_cur, values, _ = self.policy(token_ids, z[:n_samples], training=False, conditional=True)
+        dist_cur = tfd.Categorical(logits=logits_cur)
+        current_log_probs = tf.reduce_mean(dist_cur.log_prob(token_ids), axis=1)
+
+        if self.reference_policy is not None:
+            logits_ref, _, _ = self.reference_policy(token_ids, z[:n_samples], training=False, conditional=True)
+            dist_ref = tfd.Categorical(logits=logits_ref)
+            old_log_probs = tf.reduce_mean(dist_ref.log_prob(token_ids), axis=1)
+        else:
+            old_log_probs = current_log_probs
+
         smiles_list = self.vocab.batch_decode(token_ids.numpy()) # Using parallel decode
 
-        # Compute old log probs
-        logits, values, _ = self.policy(token_ids, z[:n_samples], training=False, conditional=True)
-        dist = tfd.Categorical(logits=logits)
-        old_log_probs = tf.reduce_mean(dist.log_prob(token_ids), axis=1)
+        # Filter out empty SMILES (all invalid tokens)
+        valid_smiles = [s for s in smiles_list if len(s) > 0]
+        if not valid_smiles:
+            valid_smiles = ['C']  # Fallback
 
-        # Rewards
-        rewards = self.compute_reward(smiles_list, z[:n_samples], gex, mut, cnv)
+        # Rewards with curriculum learning
+        raw_rewards = self.compute_reward(smiles_list, z[:n_samples], gex, mut, cnv, episode=episode, total_episodes=total_episodes)
+        raw_mean = float(raw_rewards.mean())
+        raw_std = float(raw_rewards.std())
+        rewards = raw_rewards.copy()
+        rewards_normalized = False
+        if raw_std > 0.05:
+            rewards = (rewards - raw_mean) / (raw_std + 1e-8)
+            rewards_normalized = True
         rewards_t = tf.constant(rewards)
 
         # GAE advantages
@@ -844,31 +1002,49 @@ class PPODrugGenerator:
         advantages = rewards - vals_mean
         returns    = rewards
 
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+        adv_mean = float(advantages.mean())
+        adv_std = float(advantages.std())
+        if adv_std > 1e-8:
+            advantages = (advantages - adv_mean) / (adv_std + 1e-8)
         advantages = tf.constant(advantages, dtype=tf.float32)
         returns_t  = tf.constant(returns, dtype=tf.float32)
 
         # PPO update
-        loss, entropy = self._ppo_update(token_ids, old_log_probs,
-                                          advantages, returns_t, z[:n_samples])
+        loss, entropy, policy_loss, vf_loss, kl_penalty, kl_signed = self._ppo_update(
+            token_ids, old_log_probs, advantages, returns_t, z[:n_samples])
 
         best_idx = np.argmax(rewards)
+        best_smiles = smiles_list[best_idx] if smiles_list[best_idx] else valid_smiles[0]
         return {
-            'loss'       : loss,
-            'entropy'    : entropy,
-            'mean_reward': rewards.mean(),
-            'best_smiles': smiles_list[best_idx],
-            'best_reward': rewards[best_idx],
+            'loss'            : loss,
+            'entropy'         : entropy,
+            'policy_loss'     : policy_loss,
+            'vf_loss'         : vf_loss,
+            'kl_penalty'      : kl_penalty,
+            'kl_signed'       : kl_signed,
+            'mean_reward'     : raw_mean,
+            'raw_reward_mean' : raw_mean,
+            'raw_reward_std'  : raw_std,
+            'normalized'      : rewards_normalized,
+            'best_smiles'     : best_smiles,
+            'best_reward'     : float(raw_rewards[best_idx]),
         }
 
     def optimize(self, z, gex, mut, cnv, episodes=HP['rl_episodes']):
         print("\n[PPO Drug Generator] Starting optimization...")
         for ep in range(1, episodes + 1):
+            # Curriculum for entropy: high at start (exploration), low at end (exploitation)
+            self.entropy_coef = max(0.03, 0.15 - (ep / episodes) * 0.12)
             stats = self.train_episode(z, gex, mut, cnv, episode=ep, total_episodes=episodes)
             if ep % 10 == 0 or ep == 1:
-                print(f"  Episode {ep:4d} | Reward: {stats['mean_reward']:+.3f} | "
-                      f"Best: {stats['best_smiles'][:30]} | "
-                      f"Entropy: {stats['entropy']:.3f}")
+                print(
+                    f"  Episode {ep:4d} | Reward: {stats['mean_reward']:+.3f} "
+                    f"(raw mean={stats['raw_reward_mean']:.3f}, std={stats['raw_reward_std']:.3f}, "
+                    f"normed={stats['normalized']}) | "
+                    f"KL: {stats['kl_penalty']:+.5f} | "
+                    f"Policy: {stats['policy_loss']:.4f} | VF: {stats['vf_loss']:.4f} | "
+                    f"Entropy: {stats['entropy']:.3f} | "
+                    f"Best: {stats['best_smiles'][:30]}")
         return stats
 
 
@@ -882,7 +1058,8 @@ def generate_synthetic_ccle_batch(batch_size=32,
                                    atom_feat_dim=22):
     """
     Generates a synthetic batch mimicking CCLE + GDSC structure.
-    In production: replace with actual CCLE/GDSC data loaders.
+    TODO: replace with GDSC2 real IC50 loader for actual model validation (~135k IC50 values).
+    Without GDSC2, this remains optimization in the void.
     """
     drug_atoms = np.random.randn(batch_size, max_atoms, atom_feat_dim).astype(np.float32)
     adj_mask   = (np.random.rand(batch_size, max_atoms, max_atoms) > 0.7).astype(np.float32)
@@ -926,7 +1103,12 @@ class DigitalTwinInference:
         self.featurizer = featurizer
 
     def predict_ic50(self, smiles: str, gex, mut, cnv) -> float:
-        atom_feat = self.featurizer.featurize(smiles)[np.newaxis]
+        from smiles_sanitizer import sanitize_smiles
+        clean_smi = sanitize_smiles(smiles)
+        if clean_smi is None:
+            return 10.0  # High IC50 for invalid SMILES
+        
+        atom_feat = self.featurizer.featurize(clean_smi)[np.newaxis]
         adj = np.ones((1, HP['max_atoms'], HP['max_atoms']), dtype=np.float32)
         gex_t = tf.constant(gex[np.newaxis], dtype=tf.float32)
         mut_t = tf.constant(mut[np.newaxis], dtype=tf.float32)
@@ -964,15 +1146,145 @@ class DigitalTwinInference:
 
 # ─── 11. MAIN — BUILD, TRAIN, RL OPTIMIZE ────────────────────────────────────
 
+PRETRAIN_SMILES = [
+    # Simple molecules for basic learning
+    "CC", "CCC", "CCCC", "CCO", "CCN", "C1CC1", "C1CCC1", "C1CCCC1", "C1CCCCC1",
+    "c1ccccc1", "C1CCNCC1", "C1CCOCC1",
+    # Médicaments connus (drug-like, avec cycles)
+    "CC(=O)Oc1ccccc1C(=O)O",           # Aspirine
+    "CC12CCC3C(C1CCC2O)CCC4=CC(=O)CCC34C",  # Testostérone
+    "CN1C=NC2=C1C(=O)N(C(=O)N2C)C",   # Caféine
+    "CC(C)Cc1ccc(cc1)C(C)C(=O)O",     # Ibuprofène
+    "c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34", # Pyrène
+    "Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C", # Imatinib-like
+    "CC1=CC2=C(C=C1)N(C3=CC=CC=C23)CC(=O)N4CCOCC4",
+    "O=C(O)c1ccccc1O",                 # Acide salicylique
+    "Nc1ccc(cc1)S(=O)(=O)N",          # Sulfanilamide
+    "CC(=O)Nc1ccc(O)cc1",             # Paracétamol
+    "c1ccc(cc1)CN2CCNCC2",
+    "Cc1ncc(COP(=O)(O)O)c(CN)c1O",    # Pyridoxine-like
+    "OC(=O)c1ccc(N)cc1",
+    "CC1CCCCC1NC(=O)c1cccc(c1)C(F)(F)F",
+    "CN(C)CCCN1c2ccccc2CCc2ccccc21",   # Imipramine-like
+    "COc1ccc(CCN)cc1O",
+    "Clc1ccc(cc1)C(c1ccccc1)(c1ccccc1)O",
+    "O=C(Nc1ccccc1)c1cccnc1",
+    "CC(N)Cc1ccc(O)cc1",               # Tyramine
+    "c1ccc2[nH]ccc2c1",                # Indole
+    "C1CCN(CC1)c1ncnc2[nH]ccc12",
+    "Nc1ncnc2c1ncn2[C@@H]1O[C@H](CO)[C@@H](O)[C@H]1O",  # Adénosine
+    "CC(=O)NCC1CN(c2nc(N)nc3c(=O)[nH]cc(c23))C(=O)O1",
+    "OC[C@H]1OC(n2cnc3c(N)ncnc23)[C@H](O)[C@@H]1O",
+    # Additional common drugs and molecules
+    "CC(C)CC1=CC=C(C=C1)O",           # Thymol
+    "CC1=C(C(=O)NC2=CC=CC=C12)C3=CC=CC=C3",  # Indomethacin
+    "CN(C)CCC=C1C2=CC=CC=C2CCC3=CC=CC=C31",  # Amitriptyline
+    "CC(C)(C)NCC(O)C1=CC=C(O)C=C1",   # Salbutamol
+    "CC1=CC(=O)NN=C1C",               # Acetylacetone
+    "C1=CC=C(C=C1)C(=O)O",            # Benzoic acid
+    "C1=CC=C(C=C1)CCO",               # Phenethyl alcohol
+    "CC1=CC=C(C=C1)C(=O)C",           # Acetophenone
+    "C1=CC=C(C=C1)CN",                # Benzylamine
+    "CC1=CC=C(C=C1)S(=O)(=O)N",       # Benzenesulfonamide
+    "C1=CC=C(C=C1)OC",                # Anisole
+    "CC1=CC=C(C=C1)OC",               # p-Methylanisole
+    "C1=CC=C(C=C1)Br",                # Bromobenzene
+    "C1=CC=C(C=C1)I",                 # Iodobenzene
+    "C1=CC=C(C=C1)F",                 # Fluorobenzene
+    "C1=CC=C(C=C1)Cl",                # Chlorobenzene
+    "C1=CC=C(C=C1)N",                 # Aniline
+    "C1=CC=C(C=C1)NO2",               # Nitrobenzene
+    "C1=CC=C(C=C1)C#N",               # Benzonitrile
+    "C1=CC=C(C=C1)C=O",               # Benzaldehyde
+    "C1=CC=C(C=C1)CC",                # Ethylbenzene
+    "CC1=CC=CC=C1",                   # Toluene
+    "C1CCCCC1",                       # Cyclohexane
+    "C1CCNCC1",                       # Piperidine
+    "C1CCOCC1",                       # Tetrahydrofuran
+    "C1CCN(CC1)C",                    # N-Methylpiperidine
+    "C1=CC=NC=C1",                    # Pyridine
+    "C1=CC=NN=C1",                    # Pyridazine
+    "C1=CN=CC=N1",                    # Pyrimidine
+    "C1=NC=NC=N1",                    # 1,3,5-Triazine
+    "C1=CC=C2C=CC=CC2=C1",            # Naphthalene
+    "C1=CC=C2C=C3C=CC=CC3=CC2=C1",     # Anthracene
+    "C1=CC=C2C(=C1)C=CC=C2",          # Indene
+    "C1=CC=C2C(=C1)NC=C2",            # Indole
+    "C1=CC=C2C(=C1)C=CN2",            # Quinoline
+    "C1=CC=C2C(=C1)N=CC=C2",          # Isoquinoline
+    "C1=CC=C2C(=C1)C=CC=N2",          # Quinazoline
+    "C1=CC=C2C(=C1)C=NC=C2",          # Quinoxaline
+    "C1=CC=C2C(=C1)C=CC=C2",          # Benzene (already have)
+    "CC(=O)NC1=CC=CC=C1",             # Acetanilide
+    "CC(=O)OC1=CC=CC=C1",             # Phenyl acetate
+    "C1=CC=C(C=C1)C(=O)NC",           # N-Methylbenzamide
+    "C1=CC=C(C=C1)C(=O)N",            # Benzamide
+    "C1=CC=C(C=C1)CON",               # Benzohydroxamic acid
+    "C1=CC=C(C=C1)C(=O)Cl",           # Benzoyl chloride
+    "C1=CC=C(C=C1)C(=O)F",            # Benzoyl fluoride
+    "C1=CC=C(C=C1)C(=O)Br",           # Benzoyl bromide
+    "C1=CC=C(C=C1)C(=O)I",            # Benzoyl iodide
+    "C1=CC=C(C=C1)C(=O)CC",           # 1-Phenylbutan-1-one
+    "C1=CC=C(C=C1)C(=O)C1=CC=CC=C1",  # Benzophenone
+    "C1=CC=C(C=C1)C(=O)C(=O)C1=CC=CC=C1",  # Benzil
+    "C1=CC=C(C=C1)C(=O)C(=O)O",       # Phenylglyoxylic acid
+    "C1=CC=C(C=C1)C(=O)C(=O)NC",      # N-Methylphenylglyoxamide
+    "C1=CC=C(C=C1)C(=O)C(=O)N",       # Phenylglyoxamide
+    "C1=CC=C(C=C1)C(=O)C(=O)Cl",      # Phenylglyoxylyl chloride
+    "C1=CC=C(C=C1)C(=O)C(=O)F",       # Phenylglyoxylyl fluoride
+    "C1=CC=C(C=C1)C(=O)C(=O)Br",      # Phenylglyoxylyl bromide
+    "C1=CC=C(C=C1)C(=O)C(=O)I",       # Phenylglyoxylyl iodide
+    "C1=CC=C(C=C1)C(=O)C(=O)CC",      # 1-Phenyl-2-oxobutan-1-one
+    "C1=CC=C(C=C1)C(=O)C(=O)C1=CC=CC=C1",  # Benzoylformic acid phenyl ester
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C1=CC=CC=C1",  # Benzoylformic acid benzoyl ester
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)O",  # Benzoylformic acid
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)NC", # N-Methylbenzoylformamide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)N",  # Benzoylformamide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)Cl", # Benzoylformyl chloride
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)F",  # Benzoylformyl fluoride
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)Br", # Benzoylformyl bromide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)I",  # Benzoylformyl iodide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)CC", # 1-Phenyl-2,3-dioxobutan-1-one
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C1=CC=CC=C1",  # Benzoylformic acid benzoyl ester
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)C1=CC=CC=C1",  # Benzoylformic acid dibenzoyl ester
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)O",  # Benzoylformic acid
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)NC", # N-Methylbenzoylformamide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)N",  # Benzoylformamide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)Cl", # Benzoylformyl chloride
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)F",  # Benzoylformyl fluoride
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)Br", # Benzoylformyl bromide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)I",  # Benzoylformyl iodide
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)CC", # 1-Phenyl-2,3,4-trioxopentan-1-one
+    "C1=CC=C(C=C1)C(=O)C(=O)C(=O)C(=O)C1=CC=CC=C1",  # Benzoylformic acid benzoyl ester
+]
+
 def main():
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
 
     # ── Build model
+    vocab      = SMILESVocabulary()
+    HP['vocab_size'] = vocab.vocab_size  # Update HP with actual vocab size
     model      = BiIntDigitalTwin(HP)
     featurizer = BRICSMolecularFeaturizer()
-    vocab      = SMILESVocabulary()
+
+    # ── Load pre-trained drug encoder weights from ChEMBL
+    if os.path.exists('pretrained_weights/chembl_drug_encoder.weights.h5'):
+        print("\n[Pre-trained] Loading ChEMBL pre-trained weights for drug encoder...")
+        # Load weights directly from HDF5
+        import h5py
+        with h5py.File('pretrained_weights/chembl_drug_encoder.weights.h5', 'r') as f:
+            # Transfer weights to matching layers
+            for layer_name in ['node_embed', 'gcn_proj_1', 'ln1', 'node_proj', 'ln2']:
+                if layer_name in [l.name for l in model.drug_gnn.layers]:
+                    if layer_name in f:
+                        weights = [np.array(f[layer_name][w]) for w in f[layer_name]]
+                        model.drug_gnn.get_layer(layer_name).set_weights(weights)
+                        print(f"  Loaded weights for layer: {layer_name}")
+        print("[Pre-trained] Drug encoder initialized with ChEMBL pre-training.")
+    else:
+        print("\n[Pre-trained] No pre-trained weights found, using random initialization.")
 
     # ── Tokenizer Persistency Demo
     vocab.save("smiles_tokenizer.json")
@@ -1009,7 +1321,7 @@ def main():
     ppo = PPODrugGenerator(policy, model, vocab, featurizer, HP)
     
     # Pre-train on valid SMILES (loaded from file or defaults)
-    valid_smiles_examples = load_smiles_from_file("smiles_data.txt")
+    valid_smiles_examples = PRETRAIN_SMILES
     print(f"\n[PreTrain] Loaded {len(valid_smiles_examples)} valid SMILES for pre-training")
     ppo.pretrain_on_valid_smiles(valid_smiles_examples, z_sample[:len(valid_smiles_examples)], epochs=100)
     
@@ -1019,9 +1331,11 @@ def main():
     print("\n[Inference] Digital Twin virtual screening demo...")
     inference = DigitalTwinInference(model, featurizer)
     test_smiles = [
-        "CC1=CC=C(C=C1)NC2=NC=CC(=N2)N3CCN(CC3)C4=CC=CC=C4",  # Imatinib-like
-        "COC1=CC2=C(C=C1OC)NC(=O)C2=CC3=CC=CC=N3",              # Gefitinib-like
-        "C1=CN=CC=C1",                                            # Pyridine
+        "CN1CCCN(C2CC2)CC(c2ccccc2NCCO)C1",  # Top GraphGA candidate QED=0.872 SA=0.794
+        "COC(=O)OCC(=O)OCC(=O)Nc1ccccc1N(C)C",  # QED=0.784 SA=0.873
+        "COC(=O)OCC(=O)OCC(=O)Nc1ccccc1C(=O)O",  # QED=0.733 SA=0.891
+        "O=C(COC(=O)COC(=O)OC1CC1)Nc1ccccc1C(=O)O",  # QED=0.710 SA=0.876
+        "CC(=O)Nc1ccccc1-c1ccccc1COC=O",  # QED=0.849 SA=0.877
     ]
     gex_demo = np.random.randn(HP['gex_dim']).astype(np.float32)
     mut_demo = np.random.randint(0, 2, HP['mut_dim']).astype(np.float32)
@@ -1042,5 +1356,162 @@ def main():
     return model, history, final_stats
 
 
+def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_drug_encoder.weights.h5'):
+    if os.path.exists(weight_path):
+        print("\n[Pre-trained] Loading ChEMBL pre-trained weights for drug encoder...")
+        import h5py
+        with h5py.File(weight_path, 'r') as f:
+            for layer_name in ['node_embed', 'gcn_proj_1', 'ln1', 'node_proj', 'ln2']:
+                if layer_name in [l.name for l in model.drug_gnn.layers] and layer_name in f:
+                    weights = [np.array(f[layer_name][w]) for w in f[layer_name]]
+                    model.drug_gnn.get_layer(layer_name).set_weights(weights)
+                    print(f"  Loaded weights for layer: {layer_name}")
+        print("[Pre-trained] Drug encoder initialized with ChEMBL pre-training.")
+        return True
+    print("\n[Pre-trained] No pre-trained weights found, using random initialization.")
+    return False
+
+
+def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None):
+    print("=" * 72)
+    print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
+    print("=" * 72)
+
+    vocab      = SMILESVocabulary()
+    HP['vocab_size'] = vocab.vocab_size
+    model      = BiIntDigitalTwin(HP)
+    featurizer = BRICSMolecularFeaturizer()
+
+    if use_pretrained:
+        load_pretrained_drug_encoder(model)
+    else:
+        print("\n[Baseline] Running without ChEMBL pre-training.")
+
+    vocab.save("smiles_tokenizer.json")
+    print("\n[Tokenizer] Saved parallel SMILES tokenizer to smiles_tokenizer.json")
+    vocab = SMILESVocabulary.load("smiles_tokenizer.json")
+    print("[Tokenizer] Successfully loaded parallel SMILES tokenizer.")
+
+    dummy_batch = generate_synthetic_ccle_batch(batch_size=2)
+    ic50_out, kl_out = model(dummy_batch[:-1], training=False)
+    print(f"\n[Model Built] IC50 output shape: {ic50_out.shape} | KL: {kl_out:.4f}")
+    print(f"  Trainable parameters: {model.count_params():,}")
+
+    print("\n[Data] Generating synthetic CCLE-style datasets...")
+    train_ds = make_tf_dataset(n_samples=256, batch_size=HP['batch_size'])
+    val_ds   = make_tf_dataset(n_samples=64,  batch_size=HP['batch_size'])
+
+    print("\n[Training] Bi-Int Digital Twin on IC50 prediction...")
+    trainer = BiIntTrainer(model, HP)
+    history = trainer.fit(train_ds, val_ds, epochs=epochs)
+
+    final_stats = None
+    if run_ppo:
+        if rl_episodes is None:
+            rl_episodes = HP['rl_episodes']
+        print("\n[RL] Initializing PPO Drug Generator...")
+        policy = DrugGeneratorPolicy(vocab_size=vocab.vocab_size)
+
+        dummy_gex = tf.random.normal([16, HP['gex_dim']])
+        dummy_mut = tf.random.uniform([16, HP['mut_dim']], 0, 2, dtype=tf.float32)
+        dummy_cnv = tf.random.normal([16, HP['cnv_dim']])
+        z_sample, _, _ = model.omics_vae((dummy_gex, dummy_mut, dummy_cnv), training=False)
+
+        ppo = PPODrugGenerator(policy, model, vocab, featurizer, HP)
+        valid_smiles_examples = PRETRAIN_SMILES
+        print(f"\n[PreTrain] Loaded {len(valid_smiles_examples)} valid SMILES for pre-training")
+        ppo.pretrain_on_valid_smiles(valid_smiles_examples, z_sample[:len(valid_smiles_examples)], epochs=100)
+        final_stats = ppo.optimize(z_sample, dummy_gex, dummy_mut, dummy_cnv, episodes=rl_episodes)
+
+        # Save RL-generated SMILES for GraphGA initialization.
+        rl_smiles = []
+        max_rl_smiles = 40
+        for _ in range(5):
+            token_ids = ppo.policy.generate(z_sample, temperature=0.85)
+            smiles_batch = ppo.vocab.batch_decode(token_ids.numpy())
+            for smi in smiles_batch:
+                smi = smi.strip()
+                if smi and smi not in rl_smiles:
+                    rl_smiles.append(smi)
+                if len(rl_smiles) >= max_rl_smiles:
+                    break
+            if len(rl_smiles) >= max_rl_smiles:
+                break
+
+        if rl_smiles:
+            with open("rl_generated_smiles.txt", "w") as f:
+                for smi in rl_smiles:
+                    f.write(f"{smi}\n")
+            with open("smiles_data.txt", "w") as f:
+                for smi in rl_smiles:
+                    f.write(f"{smi}\n")
+            print(f"\n[RL] Saved {len(rl_smiles)} RL-generated SMILES to rl_generated_smiles.txt and smiles_data.txt")
+
+        print("\n[Inference] Digital Twin virtual screening demo...")
+        inference = DigitalTwinInference(model, featurizer)
+        test_smiles = [
+            "CN1CCCN(C2CC2)CC(c2ccccc2NCCO)C1",
+            "COC(=O)OCC(=O)OCC(=O)Nc1ccccc1N(C)C",
+            "COC(=O)OCC(=O)OCC(=O)Nc1ccccc1C(=O)O",
+            "O=C(COC(=O)COC(=O)OC1CC1)Nc1ccccc1C(=O)O",
+            "CC(=O)Nc1ccccc1-c1ccccc1COC=O",
+        ]
+        gex_demo = np.random.randn(HP['gex_dim']).astype(np.float32)
+        mut_demo = np.random.randint(0, 2, HP['mut_dim']).astype(np.float32)
+        cnv_demo = np.random.randn(HP['cnv_dim']).astype(np.float32)
+
+        results = inference.screen_drug_library(test_smiles, gex_demo, mut_demo, cnv_demo)
+        print("\n  Virtual Drug Screen Results (sorted by IC50):")
+        for smiles, ic50 in results.items():
+            print(f"    {smiles[:45]:45s} → IC50: {ic50:+.3f} log µM")
+
+        ko_result = inference.virtual_gene_ko(
+            test_smiles[0], gex_demo, mut_demo, cnv_demo,
+            gene_indices=[0, 1, 5, 42]
+        )
+        print(f"\n  Virtual Gene KO Result: {ko_result}")
+
+    print("\n[Done] Pipeline complete.")
+    return model, history, final_stats
+
+
+def compare_pretraining(epochs=20):
+    print("\n=== Comparison: Baseline vs ChEMBL Pre-trained Drug Encoder ===\n")
+    print("[1/2] Running baseline model without pre-training...")
+    _, baseline_history, _ = run_pipeline(use_pretrained=False, epochs=epochs, run_ppo=False)
+    print("\n[2/2] Running model with ChEMBL pre-training...")
+    _, pretrained_history, _ = run_pipeline(use_pretrained=True, epochs=epochs, run_ppo=False)
+
+    baseline_val = baseline_history['val'][-1]
+    pretrained_val = pretrained_history['val'][-1]
+    baseline_rmse = baseline_val
+    pretrained_rmse = pretrained_val
+
+    print("\n=== Comparison Results ===")
+    print(f"Baseline final Val RMSE   : {baseline_rmse:.4f} (val_loss={baseline_val:.4f})")
+    print(f"Pre-trained final Val RMSE: {pretrained_rmse:.4f} (val_loss={pretrained_val:.4f})")
+    delta = baseline_rmse - pretrained_rmse
+    print(f"Delta (baseline - pre-trained) : {delta:+.4f}")
+    if delta > 0:
+        print("[INFO] Pre-training improved validation RMSE.")
+    elif delta < 0:
+        print("[WARN] Pre-training did not improve validation RMSE in this run.")
+    else:
+        print("[INFO] No change detected between baseline and pre-trained runs.")
+
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description='Run Bi-Int full pipeline with optional ChEMBL pre-training comparison.')
+    parser.add_argument('--mode', choices=['pretrained', 'baseline', 'compare'], default='pretrained', help='Pipeline mode to execute')
+    parser.add_argument('--epochs', type=int, default=20, help='Number of IC50 training epochs')
+    parser.add_argument('--rl-episodes', type=int, default=HP['rl_episodes'], help='Number of PPO episodes for RL drug generation')
+    parser.add_argument('--no-ppo', action='store_true', help='Skip PPO/RL drug generation, only train IC50 model')
+    args = parser.parse_args()
+
+    if args.mode == 'baseline':
+        run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False)
+    elif args.mode == 'compare':
+        compare_pretraining(epochs=args.epochs)
+    else:
+        run_pipeline(use_pretrained=True, epochs=args.epochs, rl_episodes=args.rl_episodes,
+                     run_ppo=not args.no_ppo)
