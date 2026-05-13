@@ -34,11 +34,12 @@ print("Replicas:", strategy.num_replicas_in_sync)
 #  HYPERPARAMÈTRES
 # ---------------------------------------------------------------------------
 PRETRAIN_HP = {
-    'epochs'        : 5,
-    'batch_size'    : 64,
+    'epochs'        : 10,
+    'batch_size'    : 128,
     'learning_rate' : 1e-3,
     'max_atoms'     : 60,
-    'max_compounds' : 50_000,
+    'max_compounds' : 500_000,  # 500k molécules pour éviter crash RAM
+    'chunk_size'    : 50_000,   # blocs plus petits
     'val_split'     : 0.1,
     'random_seed'   : 42,
 }
@@ -72,13 +73,15 @@ def compute_descriptors(mol):
         return None
 
 
-def load_chembl_sdf(sdf_path, max_compounds=50_000):
+def load_chembl_sdf(sdf_path, max_compounds=None):
     """
     Lit le SDF ChEMBL et retourne un DataFrame avec :
       - smiles      : SMILES canonique
       - descriptors : np.array(N_TARGETS,) de descripteurs RDKit
+    Si max_compounds=None, charge toutes les molécules valides.
     """
     print(f"[LOAD] ChEMBL SDF : {sdf_path}")
+    print(f"       Limite : {'toutes' if max_compounds is None else max_compounds} molécules")
     try:
         from rdkit import Chem
     except ImportError:
@@ -87,9 +90,14 @@ def load_chembl_sdf(sdf_path, max_compounds=50_000):
 
     records = []
     skipped = 0
+    total_seen = 0
     supplier = Chem.SDMolSupplier(sdf_path, removeHs=True, sanitize=True)
 
     for mol in supplier:
+        total_seen += 1
+        if total_seen % 100_000 == 0:
+            print(f"  ... {total_seen:,} lues | {len(records):,} valides | {skipped:,} ignorées")
+
         if mol is None:
             skipped += 1
             continue
@@ -97,7 +105,6 @@ def load_chembl_sdf(sdf_path, max_compounds=50_000):
         if not smi or len(smi) < 3:
             skipped += 1
             continue
-        # Filtrer les molécules trop grosses (au-delà de max_atoms)
         if mol.GetNumAtoms() > PRETRAIN_HP['max_atoms']:
             skipped += 1
             continue
@@ -106,12 +113,13 @@ def load_chembl_sdf(sdf_path, max_compounds=50_000):
             skipped += 1
             continue
         records.append({'smiles': smi, 'descriptors': desc})
-        if len(records) >= max_compounds:
+        if max_compounds is not None and len(records) >= max_compounds:
             break
 
     df = pd.DataFrame(records)
-    print(f"  Molécules valides chargées : {len(df)}")
-    print(f"  Ignorées (invalides/trop grandes) : {skipped}")
+    print(f"\n  Total scanné       : {total_seen:,}")
+    print(f"  Molécules valides  : {len(df):,}")
+    print(f"  Ignorées           : {skipped:,}")
     return df
 
 
@@ -192,24 +200,35 @@ class BRICSMolecularFeaturizer:
 #  CONSTRUCTION DU DATASET TF
 # ---------------------------------------------------------------------------
 def build_pretrain_dataset(df, featurizer, hp):
-    print("\n[PRETRAIN] Featurisation des molécules ChEMBL...")
+    """
+    Featurise les molécules par chunks pour éviter une explosion mémoire
+    sur 2M+ molécules, puis construit un tf.data.Dataset avec cache disque.
+    """
+    print(f"\n[PRETRAIN] Featurisation de {len(df):,} molécules ChEMBL...")
+    chunk_size = hp.get('chunk_size', 100_000)
+
     atom_feats_list, adj_list, targets = [], [], []
     skipped = 0
 
-    for _, row in df.iterrows():
-        af, adj = featurizer.featurize(row['smiles'])
-        if af is None or af.sum() == 0:
-            skipped += 1
-            continue
-        atom_feats_list.append(af)
-        adj_list.append(adj)
-        targets.append(row['descriptors'])
+    for chunk_start in range(0, len(df), chunk_size):
+        chunk = df.iloc[chunk_start:chunk_start + chunk_size]
+        for _, row in chunk.iterrows():
+            af, adj = featurizer.featurize(row['smiles'])
+            if af is None or af.sum() == 0:
+                skipped += 1
+                continue
+            atom_feats_list.append(af)
+            adj_list.append(adj)
+            targets.append(row['descriptors'])
+        done = min(chunk_start + chunk_size, len(df))
+        print(f"  Chunk {done:,}/{len(df):,} — valides jusqu'ici : {len(targets):,}")
 
-    print(f"  Exemples valides : {len(targets)}  |  Ignorés : {skipped}")
+    print(f"  Exemples valides : {len(targets):,}  |  Ignorés : {skipped:,}")
 
     atom_feats_arr = np.stack(atom_feats_list).astype(np.float32)
     adj_arr        = np.stack(adj_list).astype(np.float32)
     targets_arr    = np.stack(targets).astype(np.float32)
+    del atom_feats_list, adj_list, targets  # libérer la RAM
 
     # Normaliser les cibles (fit sur tout le set avant split)
     mean, std = fit_target_scaler(targets_arr)
@@ -232,13 +251,13 @@ def build_pretrain_dataset(df, featurizer, hp):
             targets_norm[indices],
         ))
         if shuffle:
-            ds = ds.shuffle(4096, seed=hp['random_seed'])
+            ds = ds.shuffle(min(len(indices), 50_000), seed=hp['random_seed'])
         return ds.batch(hp['batch_size']).prefetch(tf.data.AUTOTUNE)
 
     train_ds = make_ds(train_idx, shuffle=True)
     val_ds   = make_ds(val_idx)
 
-    print(f"  Train : {len(train_idx)} | Val : {len(val_idx)}")
+    print(f"  Train : {len(train_idx):,} | Val : {len(val_idx):,}")
     atom_feat_dim = atom_feats_arr.shape[-1]
     return train_ds, val_ds, atom_feat_dim, mean, std
 
@@ -380,7 +399,7 @@ def main():
         print(f"[ERROR] Fichier introuvable : {SDF_PATH}")
         sys.exit(1)
 
-    # 1. Charger ChEMBL + calculer descripteurs
+    # 1. Charger ChEMBL + calculer descripteurs (toutes les molécules si max_compounds=None)
     df = load_chembl_sdf(SDF_PATH, max_compounds=PRETRAIN_HP['max_compounds'])
     if len(df) == 0:
         print("[ERROR] Aucune molécule valide chargée.")

@@ -1,0 +1,223 @@
+nohup: ignoring input
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1778677436.808960    3482 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+I0000 00:00:1778677437.313170    3482 cpu_feature_guard.cc:227] This TensorFlow binary is optimized to use available CPU instructions in performance-critical operations.
+To enable the following instructions: AVX2 AVX_VNNI AVX_VNNI_INT8 AVX_NE_CONVERT FMA, in other operations, rebuild TensorFlow with the appropriate compiler flags.
+WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
+I0000 00:00:1778677438.714273    3482 port.cc:153] oneDNN custom operations are on. You may see slightly different numerical results due to floating-point round-off errors from different computation orders. To turn them off, set the environment variable `TF_ENABLE_ONEDNN_OPTS=0`.
+I0000 00:00:1778677440.183482    3482 gpu_device.cc:2043] Created device /job:localhost/replica:0/task:0/device:GPU:0 with 17710 MB memory:  -> device: 0, name: NVIDIA RTX 4000 Ada Generation, pci bus id: 0000:01:00.0, compute capability: 8.9
+[14:04:27] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 10 ignored.
+[14:04:27] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 10 ignored.
+[14:04:56] Warning: conflicting stereochemistry - bond wedging contradiction - at atom 48 ignored
+[14:04:56] Warning: conflicting stereochemistry - bond wedging contradiction - at atom 48 ignored
+[14:05:39] Both bonds on one end of an atropisomer are on the same side - atoms is : 3
+[14:06:27] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:06:27] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:06:29] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:06:29] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:11:04] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:11:04] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:11:11] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:11:11] ERROR: Could not sanitize molecule ending on line 38083889
+[14:11:11] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:12:55] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:12:55] ERROR: Could not sanitize molecule ending on line 47034258
+[14:12:55] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:12:58] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:12:58] ERROR: Could not sanitize molecule ending on line 47319339
+[14:12:58] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:17:16] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 20 ignored
+[14:19:37] WARNING: not removing hydrogen atom without neighbors
+[14:19:37] WARNING: not removing hydrogen atom without neighbors
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 13 ignored
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 16 ignored
+[14:20:34] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:20:35] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:20:35] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:20:35] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 13 ignored
+[14:20:35] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:20:35] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:20:35] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:21:28] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 6 ignored.
+[14:21:28] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 6 ignored.
+[14:21:28] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 11 ignored.
+[14:21:28] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 11 ignored.
+[14:21:37] WARNING: not removing hydrogen atom without neighbors
+[14:21:37] WARNING: not removing hydrogen atom without neighbors
+[14:21:58] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 5 ignored
+[14:21:58] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 8 ignored
+[14:21:58] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:21:58] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:21:58] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 21 ignored
+[14:21:58] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 19 ignored
+[14:22:36] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 1 ignored
+[14:22:38] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:22:38] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:22:38] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:22:38] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:22:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:22:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 4 ignored
+[14:22:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 29 ignored
+[14:22:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 32 ignored
+[14:22:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 7 ignored
+[14:22:40] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:22:40] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:22:45] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:22:45] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:22:48] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:23:19] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 4 ignored
+[14:23:20] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:23:20] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 32 ignored
+[14:23:25] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:23:25] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:23:26] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:23:27] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 16 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 13 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:31] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:32] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:23:32] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:32] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:32] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:32] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:23:32] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 42 ignored
+[14:23:33] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 8 ignored
+[14:23:33] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 0 ignored
+[14:23:36] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:23:36] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:23:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 7 ignored
+[14:23:39] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:25:17] Explicit valence for atom # 0 As, 7, is greater than permitted
+[14:25:17] ERROR: Could not sanitize molecule ending on line 112747432
+[14:25:17] ERROR: Explicit valence for atom # 0 As, 7, is greater than permitted
+[14:25:17] WARNING: not removing hydrogen atom without neighbors
+[14:25:17] WARNING: not removing hydrogen atom without neighbors
+[14:25:17] WARNING: not removing hydrogen atom without neighbors
+[14:25:17] WARNING: not removing hydrogen atom without neighbors
+[14:25:17] Explicit valence for atom # 22 P, 7, is greater than permitted
+[14:25:17] ERROR: Could not sanitize molecule ending on line 112762808
+[14:25:17] ERROR: Explicit valence for atom # 22 P, 7, is greater than permitted
+[14:25:22] Both bonds on one end of an atropisomer are on the same side - atoms is : 7
+[14:25:43] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:25:43] ERROR: Could not sanitize molecule ending on line 115024874
+[14:25:43] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:25:49] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:25:49] ERROR: Could not sanitize molecule ending on line 115547832
+[14:25:49] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:26:16] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 13 ignored
+[14:26:21] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 5 ignored
+[14:26:21] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 8 ignored
+[14:26:21] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:26:21] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:26:23] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:26:23] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:26:23] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 4 ignored
+[14:26:23] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 29 ignored
+[14:26:23] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 32 ignored
+[14:26:23] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 7 ignored
+[14:26:26] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:26:29] WARNING: not removing hydrogen atom without neighbors
+[14:26:29] WARNING: not removing hydrogen atom without neighbors
+[14:26:29] WARNING: not removing hydrogen atom without neighbors
+[14:26:29] WARNING: not removing hydrogen atom without neighbors
+[14:26:29] WARNING: not removing hydrogen atom without neighbors
+[14:26:29] WARNING: not removing hydrogen atom without neighbors
+[14:27:13] Explicit valence for atom # 3 Ar, 1, is greater than permitted
+[14:27:13] ERROR: Could not sanitize molecule ending on line 123047528
+[14:27:13] ERROR: Explicit valence for atom # 3 Ar, 1, is greater than permitted
+[14:27:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:27:30] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:27:33] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:27:33] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 0 ignored.
+[14:27:37] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 37 ignored
+[14:27:40] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:27:46] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:27:46] ERROR: Could not sanitize molecule ending on line 126004017
+[14:27:46] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:27:47] Explicit valence for atom # 1 P, 7, is greater than permitted
+[14:27:47] ERROR: Could not sanitize molecule ending on line 126120885
+[14:27:47] ERROR: Explicit valence for atom # 1 P, 7, is greater than permitted
+[14:27:59] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 4 ignored.
+[14:27:59] Warning: ambiguous stereochemistry - opposing bonds have opposite wedging - at atom 4 ignored.
+[14:28:52] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:28:54] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 1 ignored
+[14:28:55] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:30:09] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:30:09] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:30:09] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:30:18] Explicit valence for atom # 1 P, 7, is greater than permitted
+[14:30:18] ERROR: Could not sanitize molecule ending on line 139348895
+[14:30:18] ERROR: Explicit valence for atom # 1 P, 7, is greater than permitted
+[14:31:14] Both bonds on one end of an atropisomer are on the same side - atoms is : 0
+[14:31:14] Both bonds on one end of an atropisomer are on the same side - atoms is : 2
+[14:31:25] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:31:25] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:31:58] WARNING: not removing hydrogen atom without neighbors
+[14:31:58] WARNING: not removing hydrogen atom without neighbors
+[14:31:58] WARNING: not removing hydrogen atom without neighbors
+[14:31:58] WARNING: not removing hydrogen atom without neighbors
+[14:33:48] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 17 ignored
+[14:33:53] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:33:53] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:35:03] WARNING: not removing hydrogen atom without neighbors
+[14:35:03] WARNING: not removing hydrogen atom without neighbors
+[14:35:10] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:35:10] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:35:10] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:35:37] WARNING: not removing hydrogen atom without neighbors
+[14:35:37] WARNING: not removing hydrogen atom without neighbors
+[14:36:18] WARNING: not removing hydrogen atom without neighbors
+[14:36:18] WARNING: not removing hydrogen atom without neighbors
+[14:36:22] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:36:22] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:37:12] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 5 ignored
+[14:37:13] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 5 ignored
+[14:37:41] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:38:10] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:38:10] ERROR: Could not sanitize molecule ending on line 181177248
+[14:38:10] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:38:43] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 21 ignored
+[14:38:55] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:38:55] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:38:55] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 14 ignored
+[14:39:01] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 29 ignored
+[14:40:00] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:40:07] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:40:07] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:40:09] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 20 ignored
+[14:40:09] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 17 ignored
+[14:40:09] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:40:41] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:40:41] ERROR: Could not sanitize molecule ending on line 194483499
+[14:40:41] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:41:14] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:41:14] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 10 ignored
+[14:41:21] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 2 ignored
+[14:41:24] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 6 ignored
+[14:42:29] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 9 ignored
+[14:42:38] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:42:38] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 3 ignored
+[14:42:45] Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:42:45] ERROR: Could not sanitize molecule ending on line 205551362
+[14:42:45] ERROR: Explicit valence for atom # 0 P, 7, is greater than permitted
+[14:43:43] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 4 ignored
+[14:43:49] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 12 ignored
+[14:43:49] Warning: ambiguous stereochemistry - overlapping neighbors  - at atom 15 ignored
+[14:49:21] WARNING: not removing hydrogen atom without neighbors
+[14:50:04] WARNING: not removing hydrogen atom without neighbors
+[14:51:48] WARNING: not removing hydrogen atom without neighbors
+[14:51:48] WARNING: not removing hydrogen atom without neighbors
+[14:51:48] WARNING: not removing hydrogen atom without neighbors
+[14:53:51] WARNING: not removing hydrogen atom without neighbors
+[14:53:51] WARNING: not removing hydrogen atom without neighbors
