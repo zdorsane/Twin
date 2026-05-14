@@ -1147,19 +1147,21 @@ def load_ccle_real_data(
         return None, None, 0
     print(f"  Lignées communes IC50+GEx+CNA : {len(common_cells)}")
 
-    # ── Sélectionner top gènes par variance pour respecter gex_dim
+    # ── Sélectionner top gènes par variance pour respecter gex_dim exactement
     gex_sub = gex_df[common_cells].T  # (cells, genes)
     gene_var = gex_sub.var(axis=0)
-    top_genes = gene_var.nlargest(gex_dim).index.tolist()
-    gex_mat = gex_sub[top_genes].values.astype(np.float32)  # (cells, gex_dim)
+    top_genes = gene_var.sort_values(ascending=False).index[:gex_dim].tolist()
+    gex_mat = gex_sub[top_genes].values[:, :gex_dim].astype(np.float32)
     gex_mean, gex_std = gex_mat.mean(axis=0), gex_mat.std(axis=0) + 1e-6
     gex_mat = (gex_mat - gex_mean) / gex_std
+    print(f"  GEx shape : {gex_mat.shape}")  # doit être (cells, 978)
 
-    # ── CNA : top gènes par variance → cnv_dim
+    # ── CNA : top gènes par variance → cnv_dim exactement
     cna_sub = cna_df[common_cells].T
     cna_var = cna_sub.var(axis=0)
-    top_cna_genes = cna_var.nlargest(cnv_dim).index.tolist()
-    cna_mat = cna_sub[top_cna_genes].values.astype(np.float32)
+    top_cna_genes = cna_var.sort_values(ascending=False).index[:cnv_dim].tolist()
+    cna_mat = cna_sub[top_cna_genes].values[:, :cnv_dim].astype(np.float32)
+    print(f"  CNA shape : {cna_mat.shape}")  # doit être (cells, 426)
 
     # ── Mutations : binarisées sur mut_dim gènes les plus mutés
     mut_mat_full = np.zeros((len(common_cells), mut_dim), dtype=np.float32)

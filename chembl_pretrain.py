@@ -35,11 +35,11 @@ print("Replicas:", strategy.num_replicas_in_sync)
 # ---------------------------------------------------------------------------
 PRETRAIN_HP = {
     'epochs'        : 10,
-    'batch_size'    : 128,
+    'batch_size'    : 64,
     'learning_rate' : 1e-3,
     'max_atoms'     : 60,
-    'max_compounds' : 500_000,  # 500k molécules pour éviter crash RAM
-    'chunk_size'    : 50_000,   # blocs plus petits
+    'max_compounds' : 100_000,
+    'chunk_size'    : 25_000,
     'val_split'     : 0.1,
     'random_seed'   : 42,
 }
