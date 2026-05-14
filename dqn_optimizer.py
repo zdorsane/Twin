@@ -1,27 +1,19 @@
 """
 ================================================================================
-  DQN (Deep Q-Network) Drug Optimizer — Bi-Int Digital Twin
+  DQN Drug Optimizer — SELFIES-based (v3)  — Bi-Int Digital Twin
 ================================================================================
 
-Formulation :
-  - Etat  (state)  : vecteur latent omique z (produit par l'OmicsVAE) +
-                     représentation de la molécule courante (tokens SMILES)
-  - Action         : token SMILES suivant à appendre (espace discret = vocab)
-                     avec action masking (empêche tokens impossibles)
-  - Récompense     : IC50 prédit + validité RDKit + QED + LogP + SA + Lipinski
-                     + diversité Tanimoto
-  - Episode        : construction d'une molécule token par token jusqu'à
-                     <END> ou max_len tokens
-
-Améliorations v2 :
-  - Reward shaping : pénalité invalide -0.2 (au lieu de -2.0)
-  - Récompenses chimiques : QED, LogP, SA score, Lipinski
-  - Action masking : empêche parenthèses/cycles impossibles
-  - 2000 épisodes par défaut
+Architecture :
+  - Espace d'action  : tokens SELFIES (Self-Referencing Embedded Strings)
+                       → 100% des séquences produisent des molécules valides
+  - Etat (state)     : z_omics (OmicsVAE latent) ‖ one-hot(dernier token)
+  - Récompense       : QED + LogP + Lipinski + IC50 + diversité Tanimoto
+  - Pas de masking   : SELFIES est grammaticalement clos par construction
 
 Références :
-  Mnih et al., "Human-level control through deep reinforcement learning", Nature 2015
-  Olivecrona et al., "Molecular de novo design through deep RL", JCIM 2017
+  Krenn et al., "Self-Referencing Embedded Strings (SELFIES)", Machine Learning:
+    Science and Technology, 2020.
+  Mnih et al., "Human-level control through deep RL", Nature 2015.
 ================================================================================
 """
 
@@ -42,9 +34,16 @@ sys.path.insert(0, "/home/crbt/Twin")
 from fullPipeline import (
     BiIntDigitalTwin,
     BRICSMolecularFeaturizer,
-    SMILESVocabulary,
     HP,
 )
+
+try:
+    import selfies as sf
+    HAS_SELFIES = True
+except ImportError:
+    HAS_SELFIES = False
+    print("[ERREUR] selfies non installé — pip install selfies")
+    sys.exit(1)
 
 try:
     from rdkit import Chem
@@ -53,7 +52,38 @@ try:
     HAS_RDKIT = True
 except ImportError:
     HAS_RDKIT = False
-    print("[WARN] RDKit non disponible — validité chimique désactivée.")
+    print("[WARN] RDKit non disponible — récompenses chimiques désactivées.")
+
+
+# ─── Corpus de départ : médicaments approuvés FDA (SMILES) ───────────────────
+SEED_SMILES = [
+    # Petites molécules approuvées FDA (diversité chimique)
+    "CC(=O)Oc1ccccc1C(=O)O",                     # Aspirine
+    "CC(C)Cc1ccc(cc1)C(C)C(=O)O",                # Ibuprofène
+    "CN1CCC[C@H]1c2cccnc2",                       # Nicotine
+    "c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34",           # Pyrène
+    "Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C",  # Imatinib
+    "CC12CCC3C(C1CCC2O)CCC4=CC(=O)CCC34C",       # Testostérone
+    "CN(C)CCOC(c1ccccc1)c2ccccc2",                # Diphenhydramine
+    "O=C(O)c1ccccc1O",                            # Acide salicylique
+    "Clc1ccc(cc1)C(c2ccccc2)N3CCN(CC3)CCOCCO",   # Hydroxyzine
+    "CC(=O)Nc1ccc(O)cc1",                         # Paracétamol
+    "Oc1ccc(cc1)C2CC(=O)c3c(O)cc(O)cc3O2",       # Naringénine
+    "c1ccc2ncccc2c1",                             # Quinoline
+    "O=C(Nc1ccc(Cl)c(Cl)c1)N2CCC(CC2)N3CCOCC3", # Clozapine analogue
+    "Fc1ccc(cc1)C(=O)CCCN2CCC(CC2)c3noc4cc(F)ccc34", # Haloperidol
+    "CC(=O)[C@@H]1CC[C@H]2[C@@H]3CCC4=CC(=O)CC[C@]4(C)[C@H]3CC[C@@]12C", # Progestérone
+    "CC1=CC2=C(C=C1C)N(C=N2)[C@@H]3[C@@H]([C@@H]([C@H](O3)CO)O)O",       # Riboflavine (partiel)
+    "c1ccc(cc1)CN2CCN(CC2)c3cccc(c3)Cl",         # Clomethiazole analogue
+    "O=C1CCCN1",                                  # Pyrrolidinone
+    "c1ccc(cc1)c2cc(nn2c3ccccc3)C(F)(F)F",       # Célécoxib analogue
+    "CC1(C)OCC(O1)CN2C=NC3=CC=CC=C23",           # Noscapine analogue
+    "CC(C)(C)c1ccc(cc1)C(=O)N[C@@H](Cc2ccccc2)C(=O)N[C@@H](CC(C)C)CC(=O)O",  # Peptidomimétique
+    "O=C(O)c1ccc2c(c1)N=C(c3ccccc23)c4ccccc4",  # Acridine
+    "CCOC(=O)c1cnc(N)c(Cl)c1F",                  # Fluoroquinolone précurseur
+    "CC12CC(=O)C3C(C1CC(O2)(CC3=O)C)C",          # Stéroïde synthétique
+    "c1ccc(cc1)S(=O)(=O)Nc2ccc(cc2)N",           # Sulfanilamide
+]
 
 
 # ─── Hyper-paramètres DQN ─────────────────────────────────────────────────────
@@ -61,32 +91,121 @@ DQN_HP = dict(
     replay_buffer_size = 20_000,
     batch_size         = 64,
     gamma              = 0.99,
-    lr                 = 1e-4,
+    lr                 = 3e-4,
     eps_start          = 1.0,
     eps_end            = 0.05,
-    eps_decay_steps    = 10_000,   # plus de décroissance = meilleure exploration
+    eps_decay_steps    = 8_000,
     target_update_freq = 200,
-    max_smiles_len     = 40,
+    max_selfies_len    = 35,        # tokens SELFIES (≈ 35 tokens ≈ 30 atomes lourds)
     n_episodes         = 2_000,
     hidden_dim         = 256,
-    target_ic50        = -1.5,     # IC50 cible (log µM)
+    target_ic50        = -1.5,      # IC50 normalisé cible
     # Récompenses
-    invalid_penalty    = -0.2,     # pénalité molécule invalide
-    validity_bonus     = 0.5,      # bonus molécule valide RDKit
-    ic50_weight        = 0.5,      # poids IC50
-    qed_weight         = 1.5,      # poids QED fort (drug-likeness 0-1)
-    logp_weight        = 0.3,      # poids LogP (idéal 1-3)
-    sa_weight          = 0.2,      # poids SA score
-    lipinski_bonus     = 0.5,      # bonus règle des 5 de Lipinski
-    complexity_bonus   = 0.8,      # bonus molécules complexes (cycles, HetAt)
-    simplicity_penalty = -1.5,     # pénalité molécules trop simples (<5 atomes lourds)
-    diversity_weight   = 0.3,      # poids diversité Tanimoto
-    min_heavy_atoms    = 5,        # nb minimum atomes lourds pour être considérée
+    qed_weight         = 2.5,
+    logp_weight        = 0.5,
+    lipinski_bonus     = 0.8,
+    ic50_weight        = 0.8,
+    diversity_weight   = 0.4,
     log_interval       = 50,
 )
 
 
-# ─── 1. Replay Buffer ─────────────────────────────────────────────────────────
+# ─── Vocabulaire SELFIES ──────────────────────────────────────────────────────
+class SELFIESVocabulary:
+    """
+    Construit un vocabulaire SELFIES à partir d'un corpus de SMILES.
+    Chaque token SELFIES est un symbole atomique ou de liaison entre crochets.
+    """
+
+    PAD_TOKEN   = "[nop]"   # token de remplissage (no-op en SELFIES)
+    START_TOKEN = "[nop]"   # début d'épisode = no-op
+    END_TOKEN   = "[EOS]"   # token de fin personnalisé
+
+    def __init__(self, smiles_list: List[str]):
+        selfies_list = []
+        for smi in smiles_list:
+            try:
+                sel = sf.encoder(smi)
+                if sel:
+                    selfies_list.append(sel)
+            except Exception:
+                pass
+
+        # Collecter tous les tokens uniques
+        token_set = set()
+        for sel in selfies_list:
+            for tok in sf.split_selfies(sel):
+                token_set.add(tok)
+
+        # Garder uniquement les tokens drug-like (C, N, O, S, F, Cl, Br, cycles, liaisons)
+        DRUG_LIKE_ATOMS = {
+            "[C]", "[=C]", "[#C]", "[C-1]", "[C@@Hexpl]", "[C@Hexpl]",
+            "[N]", "[=N]", "[#N]", "[N+1]", "[NH1]", "[NH2]",
+            "[O]", "[=O]", "[OH1]",
+            "[S]", "[=S]", "[SH1]",
+            "[F]", "[Cl]", "[Br]", "[I]",
+            "[Ring1]", "[Ring2]", "[Branch1]", "[Branch2]",
+            "[=Branch1]", "[=Branch2]", "[#Branch1]", "[#Branch2]",
+            "[=Ring1]", "[=Ring2]", "[#Ring1]", "[#Ring2]",
+            "[nop]",
+        }
+        # Ajouter les tokens des SMILES du corpus (déjà filtrés)
+        # + tokens drug-like de l'alphabet standard
+        try:
+            alphabet = list(sf.get_semantic_robust_alphabet())
+            for tok in alphabet:
+                # Inclure seulement C, N, O, S, F, Cl, Br, liaisons structurales
+                if any(atom in tok for atom in ["C", "N", "O", "S", "F", "l", "r", "Ring", "Branch", "nop"]):
+                    if not any(exotic in tok for exotic in ["Si", "Se", "Te", "At", "Xe", "Kr", "Rn", "Sn", "Pb", "As", "Ge", "B]", "[B", "P]", "[P"]):
+                        token_set.add(tok)
+        except Exception:
+            pass
+
+        token_set.discard(self.END_TOKEN)
+        token_set.discard(self.PAD_TOKEN)
+
+        # Ordre déterministe
+        sorted_tokens = sorted(token_set)
+        self.idx2tok = [self.PAD_TOKEN, self.END_TOKEN] + sorted_tokens
+        self.tok2idx = {t: i for i, t in enumerate(self.idx2tok)}
+
+        self.PAD_IDX   = 0
+        self.END_IDX   = 1
+        self.vocab_size = len(self.idx2tok)
+
+        print(f"[SELFIES Vocab] {self.vocab_size} tokens | "
+              f"corpus: {len(selfies_list)} molécules valides / {len(smiles_list)} SMILES")
+
+    def encode(self, selfies_str: str) -> List[int]:
+        tokens = list(sf.split_selfies(selfies_str))
+        return [self.tok2idx.get(t, self.PAD_IDX) for t in tokens] + [self.END_IDX]
+
+    def decode(self, indices: List[int]) -> str:
+        """Convertit une liste d'indices en SELFIES puis en SMILES."""
+        tokens = []
+        for idx in indices:
+            if idx == self.END_IDX:
+                break
+            if idx == self.PAD_IDX:
+                continue
+            tok = self.idx2tok[idx]
+            if tok not in (self.PAD_TOKEN, self.END_TOKEN):
+                tokens.append(tok)
+        if not tokens:
+            return ""
+        selfies_str = "".join(tokens)
+        try:
+            smiles = sf.decoder(selfies_str)
+            return smiles or ""
+        except Exception:
+            return ""
+
+    def random_token(self) -> int:
+        """Retourne un token aléatoire hors PAD/END."""
+        return random.randint(2, self.vocab_size - 1)
+
+
+# ─── Replay Buffer ────────────────────────────────────────────────────────────
 Transition = collections.namedtuple(
     "Transition", ["state", "action", "reward", "next_state", "done"]
 )
@@ -106,7 +225,7 @@ class ReplayBuffer:
         return len(self.buffer)
 
 
-# ─── 2. Q-Network ─────────────────────────────────────────────────────────────
+# ─── Q-Network ────────────────────────────────────────────────────────────────
 class QNetwork(keras.Model):
     def __init__(self, state_dim: int, vocab_size: int, hidden_dim: int = 256, **kwargs):
         super().__init__(**kwargs)
@@ -123,59 +242,18 @@ class QNetwork(keras.Model):
         return self.net(state, training=training)
 
 
-# ─── 3. Action Masking ────────────────────────────────────────────────────────
-class ActionMask:
+# ─── Environnement SELFIES ────────────────────────────────────────────────────
+class SELFIESEnv:
     """
-    Empêche les tokens impossibles selon le contexte SMILES courant.
-    Règles :
-      - parenthèse fermante ) impossible si pas de ( ouverte
-      - chiffre de cycle impossible si trop de cycles ouverts (>9)
-      - END impossible si molécule trop courte (<3 tokens)
+    Environnement RL où chaque action ajoute un token SELFIES.
+    Toute séquence SELFIES → molécule valide (propriété de SELFIES).
     """
-    RING_DIGITS = set("0123456789")
 
-    def __init__(self, vocab: SMILESVocabulary):
-        self.vocab = vocab
-        self.idx2char = {v: k for k, v in vocab.char2idx.items()}
-
-    def get_mask(self, tokens: List[int]) -> np.ndarray:
-        """Retourne un masque booléen : True = action autorisée."""
-        mask = np.ones(self.vocab.vocab_size, dtype=bool)
-        smiles_so_far = "".join(self.idx2char.get(t, "") for t in tokens
-                                if t not in (self.vocab.char2idx.get("<START>", -1),
-                                             self.vocab.char2idx.get("<PAD>", -1),
-                                             self.vocab.char2idx.get("<EOS>", -1)))
-
-        open_parens = smiles_so_far.count("(") - smiles_so_far.count(")")
-        open_rings  = sum(smiles_so_far.count(d) % 2 for d in self.RING_DIGITS)
-
-        # Interdire ) si aucune ( ouverte
-        close_idx = self.vocab.char2idx.get(")", -1)
-        if close_idx >= 0 and open_parens <= 0:
-            mask[close_idx] = False
-
-        # Interdire EOS si molécule trop courte
-        end_idx = self.vocab.char2idx.get("<EOS>", self.vocab.char2idx.get("<END>", -1))
-        if end_idx >= 0 and len(smiles_so_far) < 3:
-            mask[end_idx] = False
-
-        # Interdire trop de cycles ouverts
-        if open_rings >= 9:
-            for d in self.RING_DIGITS:
-                d_idx = self.vocab.char2idx.get(d, -1)
-                if d_idx >= 0:
-                    mask[d_idx] = False
-
-        return mask
-
-
-# ─── 4. Environnement de génération SMILES ────────────────────────────────────
-class SMILESEnv:
     def __init__(
         self,
         digital_twin: BiIntDigitalTwin,
         featurizer: BRICSMolecularFeaturizer,
-        vocab: SMILESVocabulary,
+        vocab: SELFIESVocabulary,
         z_omics: tf.Tensor,
         hp: dict = DQN_HP,
         past_fps: List = None,
@@ -186,70 +264,66 @@ class SMILESEnv:
         self.z        = z_omics
         self.hp       = hp
         self.past_fps = past_fps or []
-        self.masker   = ActionMask(vocab)
-
-        self.max_len    = hp["max_smiles_len"]
-        self.vocab_size = vocab.vocab_size
-        self.PAD   = vocab.char2idx.get("<PAD>",   0)
-        self.END   = vocab.char2idx.get("<EOS>", vocab.char2idx.get("<END>", 1))
-        self.START = vocab.char2idx.get("<START>", self.PAD)
+        self.max_len  = hp["max_selfies_len"]
 
         self.tokens: List[int] = []
         self.step_count = 0
 
+        self._z_np = z_omics.numpy().flatten()
+        self._state_dim = len(self._z_np) + vocab.vocab_size
+
     def _build_state(self, last_token: int) -> np.ndarray:
-        z_np = self.z.numpy().flatten()
-        tok_onehot = np.zeros(self.vocab_size, dtype=np.float32)
-        tok_onehot[last_token] = 1.0
-        return np.concatenate([z_np, tok_onehot], axis=0)
+        tok_onehot = np.zeros(self.vocab.vocab_size, dtype=np.float32)
+        tok_onehot[min(last_token, self.vocab.vocab_size - 1)] = 1.0
+        return np.concatenate([self._z_np, tok_onehot], axis=0).astype(np.float32)
 
     def reset(self) -> np.ndarray:
-        self.tokens     = [self.START]
+        self.tokens     = []
         self.step_count = 0
-        return self._build_state(self.START)
-
-    def get_action_mask(self) -> np.ndarray:
-        return self.masker.get_mask(self.tokens)
+        return self._build_state(self.vocab.PAD_IDX)
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool]:
         self.tokens.append(action)
         self.step_count += 1
-        done = (action == self.END) or (self.step_count >= self.max_len)
 
+        done = (action == self.vocab.END_IDX) or (self.step_count >= self.max_len)
+
+        reward = 0.0
         if done:
             reward = self._compute_reward()
-        else:
-            reward = 0.0
 
         next_state = self._build_state(action)
         return next_state, reward, done
 
     def _compute_reward(self) -> float:
         smiles = self.vocab.decode(self.tokens)
+        if not smiles:
+            return -0.5
 
-        # 1. Validité RDKit
         mol = None
         if HAS_RDKIT:
-            mol = Chem.MolFromSmiles(smiles)
+            try:
+                mol = Chem.MolFromSmiles(smiles)
+            except Exception:
+                pass
 
         if mol is None:
-            return float(self.hp["invalid_penalty"])
+            return -0.5
 
-        # Pénalité molécule trop simple
-        n_heavy = mol.GetNumHeavyAtoms()
-        if n_heavy < self.hp["min_heavy_atoms"]:
-            return float(self.hp["simplicity_penalty"])
+        # Filtre : au moins 5 atomes lourds
+        if mol.GetNumHeavyAtoms() < 5:
+            return -0.2
 
-        reward = self.hp["validity_bonus"]  # +0.5
+        reward = 0.0
 
-        # 2. QED — drug-likeness (0 à 1, idéal > 0.6)
+        # QED — drug-likeness [0, 1]
         try:
             qed_val = rdQED.qed(mol)
-            reward += self.hp["qed_weight"] * qed_val  # max +1.5
+            reward += self.hp["qed_weight"] * qed_val
         except Exception:
             pass
 
-        # 3. LogP — lipophilicité (idéal entre 1 et 3)
+        # LogP — fenêtre idéale [1, 3]
         try:
             logp = Descriptors.MolLogP(mol)
             logp_rew = float(np.exp(-((logp - 2.0) ** 2) / 4.0))
@@ -257,58 +331,39 @@ class SMILESEnv:
         except Exception:
             pass
 
-        # 4. SA score — approximé par NumRotatableBonds + complexité
+        # Lipinski Rule of 5
         try:
-            n_rot = rdMolDescriptors.CalcNumRotatableBonds(mol)
-            sa_rew = float(np.exp(-n_rot / 10.0))
-            reward += self.hp["sa_weight"] * sa_rew
+            mw  = Descriptors.MolWt(mol)
+            hbd = rdMolDescriptors.CalcNumHBD(mol)
+            hba = rdMolDescriptors.CalcNumHBA(mol)
+            lp  = Descriptors.MolLogP(mol)
+            if mw <= 500 and hbd <= 5 and hba <= 10 and lp <= 5:
+                reward += self.hp["lipinski_bonus"]
         except Exception:
             pass
 
-        # 5. Complexité : bonus si cycles aromatiques et hétéroatomes
-        try:
-            n_arom  = rdMolDescriptors.CalcNumAromaticRings(mol)
-            n_rings = rdMolDescriptors.CalcNumRings(mol)
-            n_hetat = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() not in (6, 1))
-            complexity = min((n_arom * 0.4 + n_rings * 0.2 + n_hetat * 0.1), 1.0)
-            reward += self.hp["complexity_bonus"] * complexity
-        except Exception:
-            pass
-
-        # 6. Lipinski Rule of 5
-        try:
-            mw   = Descriptors.MolWt(mol)
-            hbd  = rdMolDescriptors.CalcNumHBD(mol)
-            hba  = rdMolDescriptors.CalcNumHBA(mol)
-            logp = Descriptors.MolLogP(mol)
-            if mw <= 500 and hbd <= 5 and hba <= 10 and logp <= 5:
-                reward += self.hp["lipinski_bonus"]  # +0.5
-        except Exception:
-            pass
-
-        # 6. IC50 prédit par le Digital Twin
+        # IC50 prédit par le Digital Twin
         try:
             atom_feat = self.feat.featurize(smiles)[np.newaxis]
-            adj = np.ones((1, HP["max_atoms"], HP["max_atoms"]), dtype=np.float32)
-            gex_dummy = tf.zeros([1, HP["gex_dim"]])
-            mut_dummy = tf.zeros([1, HP["mut_dim"]])
-            cnv_dummy = tf.zeros([1, HP["cnv_dim"]])
-            inputs = (tf.constant(atom_feat), tf.constant(adj),
-                      gex_dummy, mut_dummy, cnv_dummy)
+            adj       = np.ones((1, HP["max_atoms"], HP["max_atoms"]), dtype=np.float32)
+            gex_d     = tf.zeros([1, HP["gex_dim"]])
+            mut_d     = tf.zeros([1, HP["mut_dim"]])
+            cnv_d     = tf.zeros([1, HP["cnv_dim"]])
+            inputs    = (tf.constant(atom_feat), tf.constant(adj), gex_d, mut_d, cnv_d)
             ic50_pred, _ = self.twin(inputs, training=False)
-            ic50_val = float(ic50_pred[0].numpy())
-            ic50_rew = float(np.exp(-((ic50_val - self.hp["target_ic50"]) ** 2) / 2.0))
-            reward += self.hp["ic50_weight"] * ic50_rew * 3.0  # max +1.5
+            ic50_val  = float(ic50_pred[0].numpy())
+            ic50_rew  = float(np.exp(-((ic50_val - self.hp["target_ic50"]) ** 2) / 2.0))
+            reward   += self.hp["ic50_weight"] * ic50_rew
         except Exception:
             pass
 
-        # 7. Diversité Tanimoto
+        # Diversité Tanimoto (encourage l'exploration)
         if HAS_RDKIT and self.past_fps and self.hp["diversity_weight"] > 0:
             try:
-                fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
-                similarities = DataStructs.BulkTanimotoSimilarity(fp, self.past_fps)
-                max_sim = max(similarities) if similarities else 0.0
-                reward += (1.0 - max_sim) * self.hp["diversity_weight"] * 2.0
+                fp  = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
+                sim = DataStructs.BulkTanimotoSimilarity(fp, self.past_fps)
+                max_sim = max(sim) if sim else 0.0
+                reward += (1.0 - max_sim) * self.hp["diversity_weight"]
             except Exception:
                 pass
 
@@ -316,18 +371,16 @@ class SMILESEnv:
 
     @property
     def current_smiles(self) -> str:
-        idx2char = {v: k for k, v in self.vocab.char2idx.items()}
-        special = {self.START, self.END, self.PAD}
-        return "".join(idx2char.get(t, "") for t in self.tokens if t not in special)
+        return self.vocab.decode(self.tokens)
 
 
-# ─── 5. Agent DQN ─────────────────────────────────────────────────────────────
+# ─── Agent DQN ────────────────────────────────────────────────────────────────
 class DQNDrugOptimizer:
     def __init__(
         self,
         digital_twin: BiIntDigitalTwin,
         featurizer: BRICSMolecularFeaturizer,
-        vocab: SMILESVocabulary,
+        vocab: SELFIESVocabulary,
         hp: dict = DQN_HP,
     ):
         self.twin  = digital_twin
@@ -352,7 +405,7 @@ class DQNDrugOptimizer:
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN] Initialisé | state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"[DQN-SELFIES] Initialisé | state_dim={state_dim} | vocab_size={vocab_size}")
 
     def _sync_target(self):
         self.q_target.set_weights(self.q_online.get_weights())
@@ -362,24 +415,22 @@ class DQNDrugOptimizer:
         ratio = t / self.hp["eps_decay_steps"]
         return self.hp["eps_start"] + ratio * (self.hp["eps_end"] - self.hp["eps_start"])
 
-    def select_action(self, state: np.ndarray, mask: np.ndarray) -> int:
+    def select_action(self, state: np.ndarray) -> int:
         if random.random() < self._epsilon():
-            # Exploration : choisir parmi les actions valides uniquement
-            valid_actions = np.where(mask)[0]
-            return int(random.choice(valid_actions)) if len(valid_actions) > 0 \
-                   else random.randint(0, self.vocab.vocab_size - 1)
+            # Exploration : token aléatoire (PAD et END exclus au début)
+            return self.vocab.random_token()
         state_t  = tf.expand_dims(tf.constant(state, dtype=tf.float32), 0)
         q_values = self.q_online(state_t, training=False).numpy()[0]
-        # Masquer les actions invalides avec -inf
-        q_values[~mask] = -np.inf
+        # Décourager PAD (index 0) mais autoriser END
+        q_values[self.vocab.PAD_IDX] = -np.inf
         return int(np.argmax(q_values))
 
     @tf.function
     def _update_step(self, states, actions, rewards, next_states, dones):
         with tf.GradientTape() as tape:
-            q_all  = self.q_online(states, training=True)
-            idx    = tf.stack([tf.range(tf.shape(actions)[0]), actions], axis=1)
-            q_sa   = tf.gather_nd(q_all, idx)
+            q_all = self.q_online(states, training=True)
+            idx   = tf.stack([tf.range(tf.shape(actions)[0]), actions], axis=1)
+            q_sa  = tf.gather_nd(q_all, idx)
 
             q_next_online = self.q_online(next_states, training=False)
             best_actions  = tf.argmax(q_next_online, axis=1, output_type=tf.int32)
@@ -413,28 +464,30 @@ class DQNDrugOptimizer:
         n_episodes = n_episodes or self.hp["n_episodes"]
         z = self._get_z(gex, mut, cnv)
 
-        rewards_history = []
-        losses_history  = []
-        valid_count     = 0
+        rewards_history  = []
+        losses_history   = []
+        valid_count      = 0
+        top_molecules    = []   # (reward, smiles)
 
-        print(f"\n[DQN] Démarrage de l'optimisation — {n_episodes} épisodes")
-        print(f"  ε start={self.hp['eps_start']:.2f}  ε end={self.hp['eps_end']:.2f}")
-        print(f"  γ={self.hp['gamma']}  lr={self.hp['lr']}  batch={self.hp['batch_size']}")
-        print(f"  Reward shaping : invalide={self.hp['invalid_penalty']} | "
-              f"valide={self.hp['validity_bonus']} | QED={self.hp['qed_weight']} | "
-              f"LogP={self.hp['logp_weight']} | Lipinski={self.hp['lipinski_bonus']}\n")
+        print(f"\n[DQN-SELFIES] Démarrage — {n_episodes} épisodes")
+        print(f"  ε: {self.hp['eps_start']:.2f} → {self.hp['eps_end']:.2f} "
+              f"sur {self.hp['eps_decay_steps']} steps")
+        print(f"  Récompenses : QED×{self.hp['qed_weight']} | "
+              f"LogP×{self.hp['logp_weight']} | "
+              f"Lipinski+{self.hp['lipinski_bonus']} | "
+              f"IC50×{self.hp['ic50_weight']} | "
+              f"Diversité×{self.hp['diversity_weight']}\n")
 
         for ep in range(1, n_episodes + 1):
-            env   = SMILESEnv(self.twin, self.feat, self.vocab, z,
-                              hp=self.hp, past_fps=self.past_fps)
+            env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
+                               hp=self.hp, past_fps=self.past_fps)
             state = env.reset()
             ep_reward = 0.0
             ep_loss   = []
 
             while True:
-                mask                           = env.get_action_mask()
-                action                         = self.select_action(state, mask)
-                next_state, reward, done       = env.step(action)
+                action                   = self.select_action(state)
+                next_state, reward, done = env.step(action)
                 self.replay.push(state, action, np.float32(reward),
                                  next_state, np.float32(done))
                 state     = next_state
@@ -454,11 +507,14 @@ class DQNDrugOptimizer:
             smiles = env.current_smiles
             rewards_history.append(ep_reward)
 
-            # Compter les molécules valides
-            if ep_reward > self.hp["invalid_penalty"]:
+            # Une molécule est valide si RDKit la parse (reward > -0.4)
+            if ep_reward > -0.4 and smiles:
                 valid_count += 1
+                top_molecules.append((ep_reward, smiles))
+                top_molecules.sort(key=lambda x: -x[0])
+                top_molecules = top_molecules[:10]  # garder les 10 meilleures
 
-            if ep_reward > self.best_reward:
+            if ep_reward > self.best_reward and smiles:
                 self.best_reward = ep_reward
                 self.best_smiles = smiles
                 if HAS_RDKIT:
@@ -473,21 +529,27 @@ class DQNDrugOptimizer:
             if ep % self.hp["log_interval"] == 0 or ep == 1:
                 mean_r    = float(np.mean(rewards_history[-50:]))
                 mean_l    = float(np.mean(ep_loss)) if ep_loss else float("nan")
-                valid_pct = 100 * valid_count / ep
+                valid_pct = 100.0 * valid_count / ep
+                best_disp = (self.best_smiles[:35] if self.best_smiles else "<aucun>")
                 print(
                     f"  Ep {ep:5d}/{n_episodes} | "
                     f"ε={self._epsilon():.3f} | "
-                    f"Reward={ep_reward:+.3f} | "
-                    f"Mean(50)={mean_r:+.3f} | "
+                    f"R={ep_reward:+.3f} | "
+                    f"Moy(50)={mean_r:+.3f} | "
                     f"Valid={valid_pct:.1f}% | "
                     f"Loss={mean_l:.4f} | "
-                    f"Best: {self.best_smiles[:30]!s:30s} ({self.best_reward:.3f})"
+                    f"Best: {best_disp!s:35s} ({self.best_reward:.3f})"
                 )
 
-        print(f"\n[DQN] Optimisation terminée.")
+        print(f"\n[DQN-SELFIES] Optimisation terminée.")
         print(f"  Meilleur SMILES  : {self.best_smiles}")
         print(f"  Meilleure reward : {self.best_reward:.4f}")
         print(f"  Molécules valides: {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
+
+        if top_molecules:
+            print(f"\n  Top 5 molécules générées :")
+            for rank, (r, s) in enumerate(top_molecules[:5], 1):
+                print(f"    {rank}. reward={r:.3f}  {s}")
 
         return {
             "best_smiles"       : self.best_smiles,
@@ -495,6 +557,7 @@ class DQNDrugOptimizer:
             "reward_trajectory" : rewards_history,
             "loss_trajectory"   : losses_history,
             "valid_count"       : valid_count,
+            "top_molecules"     : top_molecules,
         }
 
     def save_weights(self, path: str = "dqn_weights"):
@@ -509,27 +572,43 @@ class DQNDrugOptimizer:
         print(f"[DQN] Poids chargés depuis {path}/")
 
 
-# ─── 6. Point d'entrée ────────────────────────────────────────────────────────
+# ─── Point d'entrée ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print("  DQN Drug Optimizer v2 — Bi-Int Digital Twin")
+    print("  DQN Drug Optimizer v3 — SELFIES — Bi-Int Digital Twin")
     print("=" * 70)
 
-    print("\n[Loading] BiIntDigitalTwin...")
+    if not HAS_SELFIES:
+        print("[ERREUR] pip install selfies")
+        sys.exit(1)
+
+    print(f"\n[selfies] version {sf.__version__}")
+
+    print("\n[Loading] BiIntDigitalTwin + vocabulaire SELFIES...")
     dt_model   = BiIntDigitalTwin(HP)
     featurizer = BRICSMolecularFeaturizer()
-    vocab      = SMILESVocabulary()
+    vocab      = SELFIESVocabulary(SEED_SMILES)
 
+    # Test de décodage vocabulaire
+    test_sel = sf.encoder("CC(=O)Oc1ccccc1C(=O)O")
+    test_idx = vocab.encode(test_sel)
+    test_smi = vocab.decode(test_idx)
+    print(f"[Vocab test] Aspirine → SELFIES → SMILES : {test_smi}")
+
+    # Données omiques synthétiques (remplacer par données réelles via fullPipeline)
     gex = tf.random.normal([1, HP["gex_dim"]])
     mut = tf.cast(tf.random.uniform([1, HP["mut_dim"]], 0, 2, dtype=tf.int32), tf.float32)
     cnv = tf.random.normal([1, HP["cnv_dim"]])
 
-    agent = DQNDrugOptimizer(dt_model, featurizer, vocab, DQN_HP)
+    agent  = DQNDrugOptimizer(dt_model, featurizer, vocab, DQN_HP)
     result = agent.optimize(gex, mut, cnv, n_episodes=DQN_HP["n_episodes"])
 
-    print(f"\n=== RÉSULTAT FINAL ===")
+    print(f"\n{'='*70}")
+    print(f"  RÉSULTAT FINAL")
+    print(f"{'='*70}")
     print(f"  Meilleur SMILES  : {result['best_smiles']}")
     print(f"  Récompense       : {result['best_reward']:.4f}")
-    print(f"  Molécules valides: {result['valid_count']}/{DQN_HP['n_episodes']}")
+    print(f"  Molécules valides: {result['valid_count']}/{DQN_HP['n_episodes']} "
+          f"({100*result['valid_count']/DQN_HP['n_episodes']:.1f}%)")
 
-    agent.save_weights("dqn_weights_v2")
+    agent.save_weights("dqn_weights_v3")
