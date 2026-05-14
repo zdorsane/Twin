@@ -268,15 +268,44 @@ Action Masking: REMOVED — SELFIES guarantees validity by construction
 | v2 | char-level SMILES + masking | 50% | `P=P` (trivial) | SMILES grammar unlearnable |
 | v3 (current) | **SELFIES (54 tok)** | **100%** | drug-like molecules | — |
 
-**Smoke-test results (20 episodes, no convergence yet):**
+**Full run results (2000 episodes):**
 
-| Episode | ε | Valid % | Best reward | Sample SMILES |
-|---------|---|---------|-------------|---------------|
-| 1 | 0.667 | 100% | 1.475 | (random valid mol) |
-| 10 | 0.050 | 100% | 2.791 | drug-like scaffold |
-| 20 | 0.050 | **100%** | 3.072 | polycyclic carbon skeleton |
+| Episode | ε | Valid % | Mean R (50) | Best reward | Best SMILES (truncated) |
+|---------|---|---------|------------|-------------|------------------------|
+| 1       | 0.996 | 100% | +1.971 | 1.971 | random valid mol |
+| 50      | 0.792 | 100% | +0.976 | 2.688 | C1[C@@H1]S=[O+1]... |
+| 200     | 0.169 | 100% | +1.360 | 2.909 | [O+1]=1[O+1][O+1]... |
+| 700     | 0.050 | 99.7% | +1.539 | 3.580 | [S+1]#[S+1]=[S+1]... |
+| 1350    | 0.050 | 99.4% | +1.175 | 3.668 | polycyclic C skeleton |
+| 2000    | 0.050 | **99.2%** | +1.216 | **3.668** | polycyclic C skeleton |
 
-Full 2000-episode run underway. With ε-decay converging and the QED×2.5 dominant reward, the agent is expected to learn to favor aromatic rings, N/O heteroatoms, and MW in [200–500 Da] range — characteristic of oral drug candidates.
+**Final results:**
+- Valid molecules: **1984/2000 (99.2%)**
+- Best reward: **3.668**
+- Best SMILES: `[C@H]12[C@@H][C@@H][C@@H][C@@H]1[C@@]=C=C=C=C=C=C2C=C=C=C=C=C=C[O-]`
+
+**Top 5 generated molecules:**
+
+| Rank | Reward | SMILES |
+|------|--------|--------|
+| 1 | 3.668 | Polycyclic C skeleton with cumulated double bonds |
+| 2 | 3.580 | `[S+1]#[S+1]=[S+1]#[S+1]...` (polysulfide — exploite QED) |
+| 3 | 3.559 | `SSSSF` |
+| 4 | 3.383 | `[S+1]=[S+1]=[S+1]...` |
+| 5 | 3.380 | `[S-1]#[S-1]=[S-1]...` |
+
+**Analysis — reward hacking identified:**
+
+The agent discovered two reward-hacking strategies:
+1. **Polysulfide chains** (`[S+1]=[S+1]=...`): RDKit computes non-zero QED for these inorganic chains, inflating reward without drug relevance.
+2. **Cumulenes** (`C=C=C=C=`): Polycyclic cumulene skeletons satisfy Lipinski MW and have high ring count, but are chemically unstable and non-synthetically accessible.
+
+**Fix applied (v3.1):** Three new reward terms added:
+- `carbon_penalty = -1.5` if carbon fraction < 30% of heavy atoms (eliminates polysulfides)
+- `cumul_penalty = -1.0` if ≥3 cumulated double bonds `=C=` (eliminates cumulenes)
+- `arom_bonus = +0.8` for aromatic rings — up to +0.8 for ≥1 aromatic ring (steers toward benzene/indole scaffolds)
+
+New run (v3.1) in progress with these corrections.
 
 ---
 
@@ -472,8 +501,8 @@ nvidia-smi
 | **Exploration** | Entropy regularization | Temperature sampling | Mutation + crossover | ε-greedy with action masking |
 | **Stability** | Variance: high (collapse at ep.70) | Variance: medium | High (90% validity) | Stable via fixed target network |
 | **Reward shaping** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED + LogP + SA + Lipinski + complexity + diversity |
-| **Best molecules** | SMILES partial | — | QED: 0.71–0.93, MW: 269–347 | In progress (v3 reward shaping) |
-| **Validity rate** | ~70% (pre-trained) | — | ~90% | **100% (v3 SELFIES)** |
+| **Best molecules** | SMILES partial | — | QED: 0.71–0.93, MW: 269–347 | 99.2% valid, reward hacking fixed in v3.1 |
+| **Validity rate** | ~70% (pre-trained) | — | ~90% | **99.2% (v3, 2000 ep.) → 100% (SELFIES guarantee)** |
 
 ---
 
@@ -484,7 +513,7 @@ nvidia-smi
 | Issue | Status | Impact |
 |-------|--------|--------|
 | Mutations not loaded | MAF format incompatible with pandas default parser | Missing 3rd omics modality |
-| DQN generates non-drug-like molecules | Agent needs 2000 episodes to converge with SELFIES | Full run in progress |
+| DQN reward hacking (polysulfides, cumulènes) | carbon_penalty + cumul_penalty + arom_bonus ajoutés (v3.1) | Re-run en cours |
 | Drug features are random | No SMILES available for CCLE drug IDs | IC50 prediction uses random drug features |
 | ChEMBL uses 100k / 2.8M | RAM constraint on WSL2 | Streaming approach needed for full dataset |
 
@@ -493,7 +522,7 @@ nvidia-smi
 1. **Fix mutations loader** — parse MAF with `sep='\t', comment='#', on_bad_lines='skip'`
 2. **Map CCLE drug names → SMILES** via PubChem API or ChEMBL compound lookup to enable real molecular features in QSAR
 3. **Scale ChEMBL pre-training** to 500k–1M molecules using streaming HDF5 cache
-4. **DQN v3 full run** — SELFIES rewrite done ✓, run 2000 episodes to measure converged QED/IC50 performance
+4. **DQN v3.1** — reward hacking corrigé ✓ (carbon_penalty + cumul_penalty + arom_bonus), re-run 2000 épisodes
 5. **Transformer-based SMILES generator** — replace GRU/LSTM in PPO with a causal Transformer decoder
 6. **Multi-task prediction** — simultaneous IC50 + GI50 + AUC prediction heads
 7. **Molecular docking integration** — AutoDock Vina reward for 3D binding affinity

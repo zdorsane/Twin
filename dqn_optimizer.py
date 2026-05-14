@@ -96,16 +96,20 @@ DQN_HP = dict(
     eps_end            = 0.05,
     eps_decay_steps    = 8_000,
     target_update_freq = 200,
-    max_selfies_len    = 35,        # tokens SELFIES (≈ 35 tokens ≈ 30 atomes lourds)
+    max_selfies_len    = 35,
     n_episodes         = 2_000,
     hidden_dim         = 256,
-    target_ic50        = -1.5,      # IC50 normalisé cible
+    target_ic50        = -1.5,
     # Récompenses
-    qed_weight         = 2.5,
+    qed_weight         = 2.0,
     logp_weight        = 0.5,
-    lipinski_bonus     = 0.8,
+    lipinski_bonus     = 1.0,
     ic50_weight        = 0.8,
     diversity_weight   = 0.4,
+    arom_bonus         = 0.8,   # bonus par cycle aromatique (force scaffolds benzéniques)
+    carbon_penalty     = -1.5,  # pénalise molécules sans carbones (S+1=S+1=...)
+    cumul_penalty      = -1.0,  # pénalise cumulènes C=C=C=C (non synthétisables)
+    min_carbon_frac    = 0.3,   # au moins 30% des atomes lourds doivent être C
     log_interval       = 50,
 )
 
@@ -314,6 +318,19 @@ class SELFIESEnv:
         if mol.GetNumHeavyAtoms() < 5:
             return -0.2
 
+        # Filtre drug-like : doit contenir des carbones (élimine [S+1]=[S+1]=... etc.)
+        atom_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
+        n_carbon = atom_nums.count(6)
+        n_heavy  = mol.GetNumHeavyAtoms()
+        if n_carbon == 0 or (n_carbon / n_heavy) < self.hp.get("min_carbon_frac", 0.3):
+            return float(self.hp.get("carbon_penalty", -1.5))
+
+        # Filtre cumulènes : pénalise C=C=C=C (chimie non synthétisable)
+        smiles_str = Chem.MolToSmiles(mol)
+        cumul_count = smiles_str.count("=C=") + smiles_str.count("=c=")
+        if cumul_count >= 3:
+            return float(self.hp.get("cumul_penalty", -1.0))
+
         reward = 0.0
 
         # QED — drug-likeness [0, 1]
@@ -328,6 +345,13 @@ class SELFIESEnv:
             logp = Descriptors.MolLogP(mol)
             logp_rew = float(np.exp(-((logp - 2.0) ** 2) / 4.0))
             reward += self.hp["logp_weight"] * logp_rew
+        except Exception:
+            pass
+
+        # Bonus cycles aromatiques (force scaffolds benzéniques, indoliques, etc.)
+        try:
+            n_arom = rdMolDescriptors.CalcNumAromaticRings(mol)
+            reward += self.hp.get("arom_bonus", 0.8) * min(n_arom, 3) / 3.0
         except Exception:
             pass
 
