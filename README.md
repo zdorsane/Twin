@@ -399,7 +399,7 @@ The best molecule `Cl[C+1]=[C+1]/S\Br` reveals a new hacking pattern: the agent 
 
 ---
 
-**v3.4 — drug-likeness refinement (current version):**
+**v3.4 — drug-likeness refinement:**
 
 Three new penalty terms added directly to the `penalties` accumulator:
 
@@ -413,27 +413,91 @@ if charged_atoms > 0:
 if any(a.GetIsotope() != 0 for a in mol.GetAtoms()):
     penalties -= 0.5                           # fixed penalty
 
-# Excess halogens: F=9, Cl=17, Br=35, I=53 — more than 2 is unusual
+# Excess halogens: F=9, Cl=17, Br=35, I=53
 n_halogens = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() in {9, 17, 35, 53})
 if n_halogens > 2:
     penalties -= (n_halogens - 2) * 0.3       # -0.3 per extra halogen
 ```
 
-**Vocabulary filter added:** Isotopic tokens (matching `\[\d+`) removed from `SELFIESVocabulary` at construction time — prevents the agent from ever selecting isotope-labeled atoms.
+**Vocabulary filter:** Isotopic tokens (regex `\[\d+`) removed from `SELFIESVocabulary` at construction — vocab drops 95 → 91 tokens (4 isotopic tokens removed).
 
-**Full v3.4 reward:**
+**v3.4 results (2000 episodes):**
+
+| Metric | Value |
+|--------|-------|
+| Valid molecules | **1,443 / 2,000 (72.2%)** |
+| Best reward | **3.484** |
+| Best SMILES | `I/[C@@]/[C@H1]=C\I` |
+| Mean reward (last 50 ep) | ~0.0 (marginal) |
+
+**v3.4 diagnosis:** Charged-carbon and isotope exploits eliminated. New hacks: (1) **diiodo scaffold** — two iodine atoms sit exactly at `max_halogens=2`, combining high MW with non-zero QED; (2) **polyyne chains** — `C#CC#CC#CC#C` (5 triple bonds) evade detection because alkyne count was not penalized. Valid% declining trend indicates reward signal starting to weaken.
+
+---
+
+**v3.5 — halogen tightening + alkyne penalty:**
+
+| Parameter | v3.4 | v3.5 | Rationale |
+|-----------|------|------|-----------|
+| `max_halogens` | 2 | 1 | Iodine pairs removed; 1 halogen is common in real drugs |
+| `halogen_penalty_coef` | 0.3 | 0.5 | Stronger deterrent |
+| `max_alkynes` | — | 1 | New: count C#C (carbon-carbon only); 1 alkynyl tolerated |
+| `alkyne_penalty_coef` | — | 0.4 | -0.4 per excess C#C triple bond |
+
+```python
+# Polyyne penalty (new in v3.5)
+n_alkynes = sum(1 for b in mol.GetBonds()
+                if b.GetBondTypeAsDouble() == 3.0
+                and b.GetBeginAtom().GetAtomicNum() == 6
+                and b.GetEndAtom().GetAtomicNum() == 6)
+if n_alkynes > max_alkynes:
+    penalties -= (n_alkynes - max_alkynes) * alkyne_penalty_coef
 ```
-R = -0.5                                      if mol is None or SELFIES decode fails
+
+**v3.5 also fixes the `SyntaxWarning: invalid escape sequence '\B'`** — docstring converted to raw string `r"""..."""`. TensorFlow/absl INFO logs suppressed via `TF_CPP_MIN_LOG_LEVEL=3` and `logging.getLogger("absl").setLevel(ERROR)`.
+
+**v3.5 results (2000 episodes):**
+
+| Metric | Value |
+|--------|-------|
+| Valid molecules | **1,254 / 2,000 (62.7%)** |
+| Best reward | **2.354** |
+| Best SMILES | `N/[C@@]\N/[C@@]\Br` |
+| Mean reward (last 50 ep) | **−0.1 to −0.6 (negative)** |
+
+**v3.5 diagnosis — reward starvation:** Mean reward turned consistently negative after ε-decay. The agent is learning to *minimize penalties* rather than *maximize drug-likeness*. Root cause: cumulative penalties now routinely subtract 0.5–1.5 from every molecule, while the maximum QED term is only +2.0. Without rings, a molecule that avoids all penalties still scores ≤ 1.5. The acyclic stereochain hack (`N/[C@@]\N/[C@@]\Br`) re-emerges because it has no rings (no `arom_bonus`), no halogens above threshold, no charges — the least-penalized structure, not the most drug-like.
+
+---
+
+**v3.6 — reward rebalancing + obligatory ring filter (current version):**
+
+**Root cause fix:** Positive signal raised, acyclic structures explicitly penalized.
+
+| Parameter | v3.5 | v3.6 | Rationale |
+|-----------|------|------|-----------|
+| `qed_weight` | 2.0 | **3.0** | Dominant positive signal: QED=0.7 → +2.1, above most penalty stacks |
+| `acyclic_penalty` | — | **-0.6** | Any molecule with zero rings (aromatic or aliphatic) penalized immediately |
+| `max_alkynes` | 1 | **0** | No C#C carbon-carbon triple bonds tolerated |
+| `alkyne_penalty_coef` | 0.4 | **0.5** | Stronger deterrent |
+| `max_halogens` | 1 | **2** | Relaxed back to avoid reward starvation |
+| `halogen_penalty_coef` | 0.5 | **0.4** | Slightly reduced |
+| `stereo_penalty_coef` | 0.1 | **0.05** | Avoid penalizing legitimate ring stereocenters |
+| `max_stereo_centers` | 8 | **12** | Natural drug-like molecules can have many stereocenters |
+
+**Full v3.6 reward function:**
+```
+R = -0.5                                      if SELFIES decode fails
   + -0.2                                      if n_heavy < 5
-  + carbon_penalty (-0.5)                     if C_frac < 25%
-  + cumul_penalty  (-0.5)                     if count(=C=) ≥ 3
-  + size_penalty                              if n_heavy > 30 (−0.05/atom excess)
-  + repeat_penalty                            if max_token_repeat > 8 (−0.1/excess)
-  + stereo_penalty                            if stereo_centers > 8 (−0.1/excess)
+  + carbon_penalty   (-0.5)                   if C_frac < 25%
+  + cumul_penalty    (-0.5)                   if count(=C=) ≥ 3
+  + size_penalty                              if n_heavy > 30  (−0.05/atom)
+  + repeat_penalty                            if max_rep_tok > 8  (−0.1/excess)
+  + stereo_penalty                            if stereo_centers > 12  (−0.05/excess)
   + charge_penalty                            −0.4 × n_charged_atoms
-  + isotope_penalty (-0.5)                    if any atom has isotope label
-  + halogen_penalty                           −0.3 × max(0, n_halogens − 2)
-  + 2.0  × QED(mol)
+  + isotope_penalty  (-0.5)                   if any isotope label
+  + halogen_penalty                           −0.4 × max(0, n_halogens − 2)
+  + alkyne_penalty                            −0.5 × n_C#C_bonds  (all penalized)
+  + acyclic_penalty  (-0.6)                   if ring_info.NumRings() == 0
+  + 3.0  × QED(mol)                           ← dominant signal
   + 0.5  × exp(-(logP-2.0)²/4)
   + 0.8  × min(n_arom_rings, 3)/3
   + 1.0                                       if Lipinski Rule of 5 satisfied
@@ -442,31 +506,37 @@ R = -0.5                                      if mol is None or SELFIES decode f
   ∈ [-1.0, 10.0]
 ```
 
-**Maximum achievable reward breakdown (ideal drug-like molecule):**
+**Maximum achievable reward breakdown (v3.6, ideal drug-like molecule):**
 
 | Term | Max value | Achieved when |
 |------|----------|--------------|
-| QED ×2.0 | +2.0 | QED = 1.0 (theoretical max) |
+| QED ×3.0 | +3.0 | QED = 1.0 (theoretical max) |
 | LogP gaussian | +0.5 | LogP = 2.0 exactly |
 | Aromatic bonus | +0.8 | ≥3 aromatic rings |
 | Lipinski | +1.0 | MW≤500, HBD≤5, HBA≤10, LogP≤5 |
 | IC50 | +0.8 | IC50 = -1.5 log µM exactly |
 | Diversity | +0.4 | No similar molecule seen before |
-| **Total** | **+5.5** | Drug with QED≈0.9, LogP≈2, 3 arom. rings, Lipinski-compliant, no charges/isotopes/excess halogens |
+| **Total** | **+6.5** | Neutral, cyclic, no alkynes, ≤2 halogens, Lipinski-compliant |
+
+A typical drug-like molecule (QED≈0.7, 2 arom. rings, Lipinski pass): R ≈ 2.1 + 0.3 + 0.53 + 1.0 = **+3.9** — well above the acyclic stereochain baseline (~0.5).
 
 ---
 
 #### 3.5 — Version comparison summary
 
-| Version | Corpus | Vocab | Key change | Valid % | Best molecule | R_best |
-|---------|--------|-------|-----------|---------|--------------|--------|
-| v1 | 25 seed | 33 (SMILES) | Initial implementation | ~2% | *(empty — decode bug)* | — |
-| v2 | 25 seed | 33 (SMILES) | Action masking + reward shaping | 50% | `P=P` (trivial) | 3.79 |
-| v3.0 | 25 seed | 54 (SELFIES) | **SELFIES representation** | 99.2% | polysulfide/cumulene hacks | 3.67 |
-| v3.1 | 25 seed | 54 (SELFIES) | carbon + cumul + arom filters | ~85% | stereocarbon chains | ~3.5 |
-| v3.2 | 10k ChEMBL | 95 (SELFIES) | corpus + size/repeat/stereo penalties | **4%** | *(early-return collapse)* | — |
-| v3.3 | 10k ChEMBL | 95 (SELFIES) | soft penalties, no early return | **87.5%** | `Cl[C+1]=[C+1]/S\Br` | 3.618 |
-| **v3.4** | **10k ChEMBL** | **95 (SELFIES)** | **charge + isotope + halogen penalties** | *running* | *running* | *running* |
+| Version | Corpus | Vocab | Key change | Valid % | Best molecule | R_best | Mean R (end) |
+|---------|--------|-------|-----------|---------|--------------|--------|-------------|
+| v1 | 25 seed | 33 (SMILES) | Initial implementation | ~2% | *(empty — decode bug)* | — | — |
+| v2 | 25 seed | 33 (SMILES) | Action masking | 50% | `P=P` (trivial) | 3.79 | — |
+| v3.0 | 25 seed | 54 (SELFIES) | **SELFIES representation** | 99.2% | polysulfide/cumulene | 3.67 | +1.2 |
+| v3.1 | 25 seed | 54 (SELFIES) | carbon + cumul + arom filters | ~85% | stereocarbon chains | ~3.5 | — |
+| v3.2 | 10k ChEMBL | 95 (SELFIES) | corpus + size/repeat/stereo | **4%** | *(collapse)* | — | −2.0 |
+| v3.3 | 10k ChEMBL | 95 (SELFIES) | soft penalties, no early return | **87.5%** | `Cl[C+1]=[C+1]/S\Br` | 3.618 | +0.7 |
+| v3.4 | 10k ChEMBL | 91 (SELFIES) | charge + isotope + halogen | 72.2% | `I/[C@@]/[C@H1]=C\I` | 3.484 | ~0.0 |
+| v3.5 | 10k ChEMBL | 91 (SELFIES) | max_halogens=1 + alkyne penalty | 62.7% | `N/[C@@]\N/[C@@]\Br` | 2.354 | **−0.3** |
+| **v3.6** | **10k ChEMBL** | **91 (SELFIES)** | **qed×3 + acyclic_penalty** | *running* | *running* | *running* | *running* |
+
+**Trend analysis:** Each version closes a hacking loophole but risks reward starvation if penalties outpace positive signal. v3.3 found the best balance (87.5% valid, positive mean reward). v3.4–v3.5 tightened constraints too aggressively. v3.6 corrects this by raising `qed_weight` from 2.0 → 3.0 and adding a structural filter (`acyclic_penalty`) that steers toward rings without punishing the overall reward budget.
 
 ---
 
@@ -511,14 +581,18 @@ If KL < 10: posterior collapse (most dimensions unused). If KL > 100: VAE acts a
 
 Reward hacking is a well-documented failure mode in RL-based molecular generation (see Guimaraes et al. 2017, Olivecrona et al. 2017). The agent optimizes the proxy reward function, not the underlying scientific objective. Each version of the DQN revealed a new hacking strategy:
 
-| Version | Hacking strategy | Why it worked | Fix |
-|---------|-----------------|--------------|-----|
-| v2 | `P=P`, `SSS` (trivial molecules) | Short sequences always valid; MW satisfies Lipinski | `min_heavy_atoms = 5` |
-| v3.0 | `[S+1]=[S+1]=[S+1]...` (polysulfides) | RDKit QED non-zero for charged S chains | `carbon_frac ≥ 0.30` |
-| v3.0 | `C=C=C=C=C=C=` (cumulenes) | Cyclic cumulenes satisfy Lipinski MW + ring count | `count(=C=) < 3` |
-| v3.1 | `[C@H1][C@H1][C@H1]...` (stereo chains) | Repeated stereocarbon tokens maximize token count within max_len | `repeat_penalty` + `stereo_penalty` + `size_penalty` |
+| Version | Hacking strategy | Why it worked | Fix applied |
+|---------|-----------------|--------------|-------------|
+| v2 | `P=P`, `SSS` (trivial molecules) | Short sequences always valid; Lipinski MW satisfied | `min_heavy_atoms = 5` |
+| v3.0 | `[S+1]=[S+1]=[S+1]...` (polysulfides) | RDKit QED non-zero for charged S chains | `carbon_frac ≥ 0.25` |
+| v3.0 | `C=C=C=C=C=C=` (cumulenes) | Cyclic cumulenes pass Lipinski MW + ring count | `count(=C=) < 3` |
+| v3.1 | `[C@H1][C@H1][C@H1]...` (stereo chains) | Repeated stereocarbon tokens fill max_len | `repeat_penalty` + `stereo_penalty` + `size_penalty` |
+| v3.2 | *(reward collapse)* | Early-return guard fired for 96% of episodes | Remove early return; soften all coefficients |
+| v3.3 | `Cl[C+1]=[C+1]/S\Br` (formal charges) | `[C+1]` alters QED Gaussian desirability values | `charge_penalty` −0.4/atom + isotope filter |
+| v3.4 | `I/[C@@]/[C@H1]=C\I` (diiodo scaffold) | 2 iodines at exactly `max_halogens=2` threshold | `max_halogens=1`, `alkyne_penalty` added |
+| v3.5 | `N/[C@@]\N/[C@@]\Br` (acyclic stereochain) | No rings → no `arom_bonus` deducted, fewest penalties | `acyclic_penalty=-0.6`, `qed_weight` 2.0→3.0 |
 
-This iterative reward debugging process mirrors real drug discovery RL practice: each fix closes one loophole, revealing the next. The correct long-term solution is a larger corpus (so the agent has real drug scaffolds to discover) combined with SA score (synthetic accessibility) as an additional reward term.
+**General pattern:** Each fix increases the minimum quality bar, but risks reward starvation if positive signals do not compensate. The iterative process converges when: (1) the reward landscape has a single dominant positive mode (high QED + rings), and (2) all pathological shortcuts are penalized below that mode. v3.6 targets this balance explicitly.
 
 ### 4.5 Transfer Learning Effect
 
@@ -591,7 +665,7 @@ Full ChEMBL 36 SDF: 2,854,815 compounds, 7.4 GB, stored at `Dataset/chembl_36.sd
 Twin/
 ├── fullPipeline.py              # Bi-Int model, QuatVAE, CCLE loader, QSAR training, PPO
 ├── chembl_pretrain.py           # GNN self-supervised pre-training on ChEMBL 100k
-├── dqn_optimizer.py             # Double DQN — SELFIES v3.4 (this work, current)
+├── dqn_optimizer.py             # Double DQN — SELFIES v3.6 (this work, current)
 ├── graphga_biint_optimizer.py   # GraphGA evolutionary drug optimizer
 ├── reinvent_biint_optimizer.py  # REINVENT-style conditional policy gradient
 ├── reinvent_optimizer.py        # Simplified REINVENT
@@ -646,13 +720,13 @@ python3 fullPipeline.py --no-ppo
 python3 fullPipeline.py --epochs 20
 ```
 
-### Step 4 — DQN Drug Generation (SELFIES v3.4)
+### Step 4 — DQN Drug Generation (SELFIES v3.6)
 ```bash
 nohup python3 dqn_optimizer.py > ~/Twin/logs_dqn.txt 2>&1 &
 tail -f ~/Twin/logs_dqn.txt
-# Extracts 10k SMILES from ChEMBL SDF, builds 95-token vocab (isotopes filtered)
+# Extracts 10k SMILES from ChEMBL SDF, builds 91-token vocab (isotopes filtered)
 # 2000 episodes | ~10-20 min on RTX 4000
-# Penalties: formal charges, isotopes, excess halogens + all v3.3 soft penalties
+# v3.6: qed_weight=3.0, acyclic_penalty=-0.6, no C#C, charge/halogen/isotope penalties
 ```
 
 ### Step 5 — GraphGA Optimization
@@ -670,7 +744,7 @@ ps aux | grep python | grep -v grep
 
 ## 9. RL Methods Comparison
 
-| | PPO | REINVENT | GraphGA | Double DQN v3.4 (this work) |
+| | PPO | REINVENT | GraphGA | Double DQN v3.6 (this work) |
 |---|---|---|---|---|
 | **Paradigm** | Policy gradient (on-policy) | Policy gradient (off-policy KL) | Evolutionary | Q-learning (off-policy) |
 | **Mol. representation** | char-level SMILES (LSTM) | char-level SMILES | Molecular graph | **SELFIES tokens** |
@@ -678,9 +752,9 @@ ps aux | grep python | grep -v grep
 | **Exploration** | Entropy regularization | Temperature annealing | Mutation + crossover | ε-greedy: 1.0 → 0.05 |
 | **Validity guarantee** | ~70% (pre-trained policy) | ~80% (pre-trained) | ~90% | **100% (SELFIES)** |
 | **Stability** | High variance, collapse ~ep.70 | Medium variance | High | Target network prevents overestimation |
-| **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED + LogP + Lipinski + arom + diversity + charge/isotope/halogen penalties |
-| **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators constrain space) | Polysulfides → cumulenes → stereo chains → formal charges (each fixed iteratively) |
-| **Best results** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v3.3: 87.5% valid, R=3.618 (`Cl[C+1]=[C+1]/S\Br`) |
+| **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED×3 + LogP + Lipinski + arom + diversity + 7 structural penalties |
+| **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators) | Polysulfides → cumulenes → stereo chains → formal charges → diiodo → polynes → acyclic (each fixed iteratively) |
+| **Best results** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v3.3: 87.5% valid, R=3.618 \| v3.6: *running* |
 | **Corpus for generation** | 25 seed SMILES | — | — | **10,000 ChEMBL SMILES (QED≥0.3)** |
 
 ---
@@ -694,7 +768,7 @@ ps aux | grep python | grep -v grep
 | Drug features are random vectors | No SMILES→CCLE drug ID mapping available | Drug encoder learns noise; IC50 model generalizes less to unseen drugs |
 | Mutations modality absent | MAF format incompatible with default pandas parser | 3rd omics axis missing; model uses only GEx + CNA |
 | ChEMBL pre-training on 100k / 2.8M | WSL2 RAM limit (OOM at 500k) | GNN sees only 3.5% of available chemical space |
-| DQN v3.4 reward hacking | Proxy reward ≠ true drug quality; iterative patching | Formal charges/halogens fixed in v3.4; SA score + synthetic feasibility still needed |
+| DQN reward hacking (v3.0–v3.6) | Proxy reward ≠ true drug quality; 7 hacking strategies identified and patched iteratively | SA score (synthetic accessibility) still missing; would close most remaining loopholes |
 | No SA score in reward | sascorer.py not integrated | Agent not penalized for synthetically inaccessible molecules |
 
 ### Prioritized Next Steps
@@ -729,4 +803,4 @@ ps aux | grep python | grep -v grep
 ---
 
 *All experiments run on Ubuntu 24.04 LTS (WSL2) with NVIDIA RTX 4000 Ada (17,710 MB VRAM), TensorFlow 2.21.0, SELFIES 2.1.1, RDKit 2024.*
-*Source code: `fullPipeline.py` (model + CCLE loader), `chembl_pretrain.py` (GNN pre-training), `dqn_optimizer.py` (DQN v3.4).*
+*Source code: `fullPipeline.py` (model + CCLE loader), `chembl_pretrain.py` (GNN pre-training), `dqn_optimizer.py` (DQN v3.6).*
