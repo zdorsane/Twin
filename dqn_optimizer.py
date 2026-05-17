@@ -1,19 +1,24 @@
 """
 ================================================================================
-  DQN Drug Optimizer — SELFIES v3.2  — Bi-Int Digital Twin
+  DQN Drug Optimizer — SELFIES v3.4  — Bi-Int Digital Twin
 ================================================================================
 
-Améliorations v3.2 vs v3.1 :
-  - Corpus 10 000 SMILES extraits de ChEMBL (vs 25 seed SMILES)
-  - Vocab SELFIES enrichi (~150+ tokens drug-like réels)
-  - Pénalité longueur excessive  (>25 atomes lourds)
-  - Pénalité répétition tokens   (même token >4 fois)
-  - Pénalité stéréochimie excess (>6 centres stéréo)
-  - Maintien des filtres v3.1    (carbon_frac, cumul, arom_bonus)
+Historique des versions :
+  v3.0 : SELFIES de base (100% valides), mais polysulfides + cumulènes hackés
+  v3.1 : +carbon_frac + cumul_penalty → stéréochaînes hackées
+  v3.2 : +repeat/stereo/size penalties → collapse reward (4% valides)
+  v3.3 : pénalités douces sans retour anticipé → 87.5% valides, mais
+         charges formelles (Cl[C+1]=[C+1]/S\Br) et halogènes exploités
+  v3.4 : Drug-likeness refinement
+    - Pénalité charges formelles : -0.4 × nb_atomes_chargés
+    - Pénalité isotopes          : -0.5 si atome isotopique détecté
+    - Pénalité halogènes excessifs : -0.3 par halogène au-delà de 2
+    - Filtre vocab : tokens isotopiques retirés du SELFIESVocabulary
 
 Références :
   Krenn et al., "SELFIES", Mach. Learn.: Sci. Technol. 2020.
   Mnih et al., "Human-level control through deep RL", Nature 2015.
+  Lipinski et al., "Experimental and computational approaches...", 1997.
 ================================================================================
 """
 
@@ -164,19 +169,22 @@ DQN_HP = dict(
     ic50_weight        = 0.8,
     diversity_weight   = 0.4,
     arom_bonus         = 0.8,
-    # ── Pénalités chimiques (v3.3 — douces, jamais de retour anticipé)
-    # Règle : toutes les pénalités sont des déductions sur un reward positif,
-    # jamais des retours à -2.0 qui noient le signal.
-    carbon_penalty     = -0.5,   # réduit (était -1.5) : molécule sans carbone
-    cumul_penalty      = -0.5,   # réduit (était -1.0) : cumulènes
-    min_carbon_frac    = 0.25,   # assoupli (était 0.3)
-    size_penalty_coef  = 0.05,   # réduit (était 0.15) : -0.05/atome > 30
-    max_heavy_atoms    = 30,     # augmenté (était 25)
-    repeat_penalty_coef= 0.1,    # réduit (était 0.4) : -0.1/répétition > 8
-    max_token_repeat   = 8,      # assoupli (était 4)
-    stereo_penalty_coef= 0.1,    # réduit (était 0.3) : -0.1/centre > 8
-    max_stereo_centers = 8,      # assoupli (était 6)
-    log_interval       = 50,
+    # ── Pénalités chimiques v3.3 (douces, jamais de retour anticipé)
+    carbon_penalty     = -0.5,
+    cumul_penalty      = -0.5,
+    min_carbon_frac    = 0.25,
+    size_penalty_coef  = 0.05,
+    max_heavy_atoms    = 30,
+    repeat_penalty_coef= 0.1,
+    max_token_repeat   = 8,
+    stereo_penalty_coef= 0.1,
+    max_stereo_centers = 8,
+    # ── Pénalités drug-likeness v3.4 (nouvelles)
+    charge_penalty_coef   = 0.4,   # -0.4 par atome chargé formellement
+    isotope_penalty       = -0.5,  # fixe si atome isotopique présent
+    halogen_penalty_coef  = 0.3,   # -0.3 par halogène au-delà de 2
+    max_halogens          = 2,     # F, Cl, Br, I autorisés jusqu'à 2
+    log_interval          = 50,
 )
 
 
@@ -209,6 +217,11 @@ class SELFIESVocabulary:
                         token_set.add(tok)
         except Exception:
             pass
+
+        # Retirer les tokens isotopiques (ex: [11C], [125I], [14CH2]) — v3.4
+        import re
+        _isotope_re = re.compile(r"\[\d+")
+        token_set = {t for t in token_set if not _isotope_re.search(t)}
 
         token_set.discard(self.END_TOKEN)
         token_set.discard(self.PAD_TOKEN)
@@ -358,6 +371,23 @@ class SELFIESEnv:
         if stereo_count > self.hp["max_stereo_centers"]:
             penalties -= (stereo_count - self.hp["max_stereo_centers"]) * self.hp["stereo_penalty_coef"]
 
+        # ── Pénalités drug-likeness v3.4 ──────────────────────────────────────
+        # Charges formelles (Cl[C+1]=[C+1]... exploitation)
+        charged_atoms = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() != 0)
+        if charged_atoms > 0:
+            penalties -= charged_atoms * self.hp["charge_penalty_coef"]
+
+        # Isotopes (tokens filtrés du vocab, mais un token peut encoder un isotope
+        # via SELFIES sémantique — vérification sur la molécule RDKit)
+        if any(a.GetIsotope() != 0 for a in mol.GetAtoms()):
+            penalties += self.hp["isotope_penalty"]   # valeur négative
+
+        # Halogènes excessifs (F=9, Cl=17, Br=35, I=53)
+        HALOGENS = {9, 17, 35, 53}
+        n_halogens = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() in HALOGENS)
+        if n_halogens > self.hp["max_halogens"]:
+            penalties -= (n_halogens - self.hp["max_halogens"]) * self.hp["halogen_penalty_coef"]
+
         reward = 0.0
 
         # QED
@@ -441,7 +471,7 @@ class DQNDrugOptimizer:
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN-SELFIES v3.2] state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"[DQN-SELFIES v3.4] state_dim={state_dim} | vocab_size={vocab_size}")
 
     def _sync_target(self):
         self.q_target.set_weights(self.q_online.get_weights())
@@ -494,11 +524,13 @@ class DQNDrugOptimizer:
 
         rewards_hist, valid_count, top_mols = [], 0, []
 
-        print(f"\n[DQN v3.2] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
+        print(f"\n[DQN v3.4] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
         print(f"  ε: {self.hp['eps_start']} → {self.hp['eps_end']} / {self.hp['eps_decay_steps']} steps")
         print(f"  Pénalités : taille(>{self.hp['max_heavy_atoms']} atomes) | "
               f"répétition(>{self.hp['max_token_repeat']}×) | "
-              f"stéréo(>{self.hp['max_stereo_centers']} centres)\n")
+              f"stéréo(>{self.hp['max_stereo_centers']} centres) | "
+              f"charges formelles(-{self.hp['charge_penalty_coef']}/atome) | "
+              f"halogènes(>{self.hp['max_halogens']})\n")
 
         for ep in range(1, n_episodes + 1):
             env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
@@ -548,7 +580,7 @@ class DQNDrugOptimizer:
                       f"Valid={100*valid_count/ep:.1f}% | Loss={mean_l:.4f} | "
                       f"Best: {self.best_smiles[:40]!s:40s} ({self.best_reward:.3f})")
 
-        print(f"\n[DQN v3.2] Terminé.")
+        print(f"\n[DQN v3.4] Terminé.")
         print(f"  Meilleur SMILES  : {self.best_smiles}")
         print(f"  Meilleure reward : {self.best_reward:.4f}")
         print(f"  Valides          : {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
@@ -574,7 +606,7 @@ class DQNDrugOptimizer:
 # ─── Point d'entrée ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print("  DQN Drug Optimizer v3.2 — SELFIES + ChEMBL 10k corpus")
+    print("  DQN Drug Optimizer v3.4 — SELFIES + ChEMBL 10k corpus")
     print("=" * 70)
 
     # 1. Charger corpus ChEMBL
@@ -608,4 +640,4 @@ if __name__ == "__main__":
     print(f"  Valides         : {result['valid_count']}/{DQN_HP['n_episodes']} "
           f"({100*result['valid_count']/DQN_HP['n_episodes']:.1f}%)")
 
-    agent.save_weights("dqn_weights_v3")
+    agent.save_weights("dqn_weights_v3.4")

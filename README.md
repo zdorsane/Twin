@@ -121,7 +121,7 @@ The trained model serves as a **reward oracle** for three reinforcement learning
 
        ├── PPO  (Proximal Policy Optimization — LSTM policy)
        ├── GraphGA  (Genetic Algorithm on molecular graphs)
-       └── DQN  (Double Deep Q-Network — SELFIES v3.2)  ← this work
+       └── DQN  (Double Deep Q-Network — SELFIES v3.4)  ← this work
 ```
 
 ---
@@ -340,7 +340,7 @@ The agent discovered these pathways during ε-greedy exploration and reinforced 
 
 ---
 
-**v3.2 — corpus upgrade + structural penalties (current version):**
+**v3.2 — corpus upgrade + structural penalties:**
 
 **Corpus upgrade:** 10,000 SMILES extracted directly from `chembl_36.sdf` using drug-likeness filters:
 ```python
@@ -353,33 +353,93 @@ result:  10,000 accepted from 13,523 scanned  (74.0% acceptance rate)
 | Version | Corpus | Vocab size | Stereo tokens |
 |---------|--------|-----------|--------------|
 | v3.0 | 25 seed SMILES | 54 tokens | ~4 |
-| v3.2 | **10,000 ChEMBL SMILES** | **95 tokens** | **11** |
+| v3.2+ | **10,000 ChEMBL SMILES** | **95 tokens** | **11** |
 
-The larger, more chemically diverse corpus exposes the vocabulary builder to real medicinal chemistry scaffolds: benzodiazepines, quinolines, piperazines, lactams, sulfonamides, etc. — patterns a drug-generative model should know.
+The larger corpus exposes the vocabulary builder to real medicinal chemistry scaffolds: benzodiazepines, quinolines, piperazines, lactams, sulfonamides, etc.
 
-**Three new structural penalties (v3.2):**
+**Three structural penalties (v3.2):**
 
 | Penalty | Trigger | Formula | Rationale |
 |---------|---------|---------|-----------|
-| `size_penalty` | n_heavy > 25 | -0.15 × (n_heavy - 25) | Drugs > 25 heavy atoms ≈ MW > 375 Da approach fragment-like upper limit; chains grow unbounded without this |
-| `repeat_penalty` | same token appears > 4× | -0.4 × (max_count - 4) | Penalizes `[C@H1]` repeated 20× in one episode; forces token diversity |
-| `stereo_penalty` | stereo centers > 6 | -0.3 × (n_stereo - 6) | Asymmetric stereocenters (11 tokens indexed) > 6 indicates pathological stereochemistry not found in real drugs |
+| `size_penalty` | n_heavy > 25 | -0.15 × (n_heavy - 25) | Chains grow unbounded without this |
+| `repeat_penalty` | same token > 4× | -0.4 × (max_count - 4) | Penalizes `[C@H1]` repeated 20× |
+| `stereo_penalty` | stereo centers > 6 | -0.3 × (n_stereo - 6) | Pathological stereocenters |
 
-**Full v3.2 reward:**
+**v3.2 bug — reward collapse (4% valid):** The repeat/stereo penalties combined with an early-return guard (`if rep_pen + stereo_pen < -1.5: return -2.0`) triggered for ~96% of episodes with the 95-token vocab (a single token repeated 5× exceeds the `max_token_repeat=4` threshold). This was a catastrophic signal collapse.
+
+---
+
+**v3.3 — rebalanced penalties, no early returns (fix for reward collapse):**
+
+All penalties rewritten as soft deductions added to a unified `penalties` variable. No early return exists for structural penalties — every episode reaches full reward computation.
+
+| Parameter | v3.2 | v3.3 | Rationale |
+|-----------|------|------|-----------|
+| `max_token_repeat` | 4 | 8 | 95-token vocab: a token repeated 5× is normal |
+| `max_stereo_centers` | 6 | 8 | Allow natural drug stereocenters |
+| `max_heavy_atoms` | 25 | 30 | Allow larger fragments |
+| `repeat_penalty_coef` | 0.4 | 0.1 | Soft deduction |
+| `stereo_penalty_coef` | 0.3 | 0.1 | Soft deduction |
+| `size_penalty_coef` | 0.15 | 0.05 | Soft deduction |
+| `carbon_penalty` | -1.5 | -0.5 | Soft deduction (was too harsh) |
+| `cumul_penalty` | -1.0 | -0.5 | Soft deduction |
+
+**v3.3 results (2000 episodes):**
+
+| Metric | Value |
+|--------|-------|
+| Valid molecules | **1,750 / 2,000 (87.5%)** |
+| Best reward | **3.618** |
+| Best SMILES | `Cl[C+1]=[C+1]/S\Br` |
+| Training stability | Stable (loss 0.01–0.02, no collapse) |
+| ε at end | 0.050 |
+
+**v3.3 diagnosis — formal charge exploitation:**
+The best molecule `Cl[C+1]=[C+1]/S\Br` reveals a new hacking pattern: the agent discovered that **formal charges** (`[C+1]`) generate non-trivial QED scores in RDKit. Formal charges alter atom electronegativities in the Gaussian desirability functions used by QED, producing scores that do not reflect real drug-likeness. Additionally, halogens (Cl, Br) in combination with short chains create molecules that satisfy Lipinski MW while scoring well on LogP. These are chemically unrealistic: formally charged carbon atoms are not stable under physiological conditions.
+
+---
+
+**v3.4 — drug-likeness refinement (current version):**
+
+Three new penalty terms added directly to the `penalties` accumulator:
+
+```python
+# Formal charges: [C+1], [N+1], [O+1], [S+1] etc.
+charged_atoms = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() != 0)
+if charged_atoms > 0:
+    penalties -= charged_atoms * 0.4          # -0.4 per charged atom
+
+# Isotope labels: [11C], [125I] — filtered from vocab too
+if any(a.GetIsotope() != 0 for a in mol.GetAtoms()):
+    penalties -= 0.5                           # fixed penalty
+
+# Excess halogens: F=9, Cl=17, Br=35, I=53 — more than 2 is unusual
+n_halogens = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() in {9, 17, 35, 53})
+if n_halogens > 2:
+    penalties -= (n_halogens - 2) * 0.3       # -0.3 per extra halogen
 ```
-R = structural_penalties (rep + stereo)      [applied first — early exit if < -1.5]
-  + -0.5                                      if mol is None after SELFIES decode
+
+**Vocabulary filter added:** Isotopic tokens (matching `\[\d+`) removed from `SELFIESVocabulary` at construction time — prevents the agent from ever selecting isotope-labeled atoms.
+
+**Full v3.4 reward:**
+```
+R = -0.5                                      if mol is None or SELFIES decode fails
   + -0.2                                      if n_heavy < 5
-  + size_penalty                              if n_heavy > 25
-  + carbon_penalty (-1.5)                     if C_frac < 30%
-  + cumul_penalty  (-1.0)                     if cumulated_bonds ≥ 3
+  + carbon_penalty (-0.5)                     if C_frac < 25%
+  + cumul_penalty  (-0.5)                     if count(=C=) ≥ 3
+  + size_penalty                              if n_heavy > 30 (−0.05/atom excess)
+  + repeat_penalty                            if max_token_repeat > 8 (−0.1/excess)
+  + stereo_penalty                            if stereo_centers > 8 (−0.1/excess)
+  + charge_penalty                            −0.4 × n_charged_atoms
+  + isotope_penalty (-0.5)                    if any atom has isotope label
+  + halogen_penalty                           −0.3 × max(0, n_halogens − 2)
   + 2.0  × QED(mol)
   + 0.5  × exp(-(logP-2.0)²/4)
   + 0.8  × min(n_arom_rings, 3)/3
-  + 1.0                                       if Lipinski satisfied
+  + 1.0                                       if Lipinski Rule of 5 satisfied
   + 0.8  × exp(-(IC50-(-1.5))²/2)
-  + 0.4  × (1 - max_Tanimoto)
-  ∈ [-2.0, 10.0]
+  + 0.4  × (1 - max_Tanimoto_sim)
+  ∈ [-1.0, 10.0]
 ```
 
 **Maximum achievable reward breakdown (ideal drug-like molecule):**
@@ -392,7 +452,7 @@ R = structural_penalties (rep + stereo)      [applied first — early exit if < 
 | Lipinski | +1.0 | MW≤500, HBD≤5, HBA≤10, LogP≤5 |
 | IC50 | +0.8 | IC50 = -1.5 log µM exactly |
 | Diversity | +0.4 | No similar molecule seen before |
-| **Total** | **+5.5** | Drug with QED≈0.9, LogP≈2, 3 arom. rings, Lipinski-compliant |
+| **Total** | **+5.5** | Drug with QED≈0.9, LogP≈2, 3 arom. rings, Lipinski-compliant, no charges/isotopes/excess halogens |
 
 ---
 
@@ -404,7 +464,9 @@ R = structural_penalties (rep + stereo)      [applied first — early exit if < 
 | v2 | 25 seed | 33 (SMILES) | Action masking + reward shaping | 50% | `P=P` (trivial) | 3.79 |
 | v3.0 | 25 seed | 54 (SELFIES) | **SELFIES representation** | 99.2% | polysulfide/cumulene hacks | 3.67 |
 | v3.1 | 25 seed | 54 (SELFIES) | carbon + cumul + arom filters | ~85% | stereocarbon chains | ~3.5 |
-| **v3.2** | **10k ChEMBL** | **95 (SELFIES)** | **corpus + size/repeat/stereo penalties** | *running* | *running* | *running* |
+| v3.2 | 10k ChEMBL | 95 (SELFIES) | corpus + size/repeat/stereo penalties | **4%** | *(early-return collapse)* | — |
+| v3.3 | 10k ChEMBL | 95 (SELFIES) | soft penalties, no early return | **87.5%** | `Cl[C+1]=[C+1]/S\Br` | 3.618 |
+| **v3.4** | **10k ChEMBL** | **95 (SELFIES)** | **charge + isotope + halogen penalties** | *running* | *running* | *running* |
 
 ---
 
@@ -529,7 +591,7 @@ Full ChEMBL 36 SDF: 2,854,815 compounds, 7.4 GB, stored at `Dataset/chembl_36.sd
 Twin/
 ├── fullPipeline.py              # Bi-Int model, QuatVAE, CCLE loader, QSAR training, PPO
 ├── chembl_pretrain.py           # GNN self-supervised pre-training on ChEMBL 100k
-├── dqn_optimizer.py             # Double DQN — SELFIES v3.2 (this work, current)
+├── dqn_optimizer.py             # Double DQN — SELFIES v3.4 (this work, current)
 ├── graphga_biint_optimizer.py   # GraphGA evolutionary drug optimizer
 ├── reinvent_biint_optimizer.py  # REINVENT-style conditional policy gradient
 ├── reinvent_optimizer.py        # Simplified REINVENT
@@ -584,12 +646,13 @@ python3 fullPipeline.py --no-ppo
 python3 fullPipeline.py --epochs 20
 ```
 
-### Step 4 — DQN Drug Generation (SELFIES v3.2)
+### Step 4 — DQN Drug Generation (SELFIES v3.4)
 ```bash
 nohup python3 dqn_optimizer.py > ~/Twin/logs_dqn.txt 2>&1 &
 tail -f ~/Twin/logs_dqn.txt
-# Extracts 10k SMILES from ChEMBL SDF, builds 95-token vocab
+# Extracts 10k SMILES from ChEMBL SDF, builds 95-token vocab (isotopes filtered)
 # 2000 episodes | ~10-20 min on RTX 4000
+# Penalties: formal charges, isotopes, excess halogens + all v3.3 soft penalties
 ```
 
 ### Step 5 — GraphGA Optimization
@@ -607,7 +670,7 @@ ps aux | grep python | grep -v grep
 
 ## 9. RL Methods Comparison
 
-| | PPO | REINVENT | GraphGA | Double DQN v3.2 (this work) |
+| | PPO | REINVENT | GraphGA | Double DQN v3.4 (this work) |
 |---|---|---|---|---|
 | **Paradigm** | Policy gradient (on-policy) | Policy gradient (off-policy KL) | Evolutionary | Q-learning (off-policy) |
 | **Mol. representation** | char-level SMILES (LSTM) | char-level SMILES | Molecular graph | **SELFIES tokens** |
@@ -615,9 +678,9 @@ ps aux | grep python | grep -v grep
 | **Exploration** | Entropy regularization | Temperature annealing | Mutation + crossover | ε-greedy: 1.0 → 0.05 |
 | **Validity guarantee** | ~70% (pre-trained policy) | ~80% (pre-trained) | ~90% | **100% (SELFIES)** |
 | **Stability** | High variance, collapse ~ep.70 | Medium variance | High | Target network prevents overestimation |
-| **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED + LogP + Lipinski + arom + diversity + structural penalties |
-| **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators constrain space) | Polysulfides → cumulenes → stereo chains (each fixed iteratively) |
-| **Best results** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | *v3.2 run in progress* |
+| **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED + LogP + Lipinski + arom + diversity + charge/isotope/halogen penalties |
+| **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators constrain space) | Polysulfides → cumulenes → stereo chains → formal charges (each fixed iteratively) |
+| **Best results** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v3.3: 87.5% valid, R=3.618 (`Cl[C+1]=[C+1]/S\Br`) |
 | **Corpus for generation** | 25 seed SMILES | — | — | **10,000 ChEMBL SMILES (QED≥0.3)** |
 
 ---
@@ -631,7 +694,7 @@ ps aux | grep python | grep -v grep
 | Drug features are random vectors | No SMILES→CCLE drug ID mapping available | Drug encoder learns noise; IC50 model generalizes less to unseen drugs |
 | Mutations modality absent | MAF format incompatible with default pandas parser | 3rd omics axis missing; model uses only GEx + CNA |
 | ChEMBL pre-training on 100k / 2.8M | WSL2 RAM limit (OOM at 500k) | GNN sees only 3.5% of available chemical space |
-| DQN v3.2 reward hacking | Proxy reward ≠ true drug quality; iterative patching | Each fix closes one loophole; SA score + synthetic feasibility needed |
+| DQN v3.4 reward hacking | Proxy reward ≠ true drug quality; iterative patching | Formal charges/halogens fixed in v3.4; SA score + synthetic feasibility still needed |
 | No SA score in reward | sascorer.py not integrated | Agent not penalized for synthetically inaccessible molecules |
 
 ### Prioritized Next Steps
@@ -666,4 +729,4 @@ ps aux | grep python | grep -v grep
 ---
 
 *All experiments run on Ubuntu 24.04 LTS (WSL2) with NVIDIA RTX 4000 Ada (17,710 MB VRAM), TensorFlow 2.21.0, SELFIES 2.1.1, RDKit 2024.*
-*Source code: `fullPipeline.py` (model + CCLE loader), `chembl_pretrain.py` (GNN pre-training), `dqn_optimizer.py` (DQN v3.2).*
+*Source code: `fullPipeline.py` (model + CCLE loader), `chembl_pretrain.py` (GNN pre-training), `dqn_optimizer.py` (DQN v3.4).*
