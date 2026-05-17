@@ -19,3 +19,7 @@ __pycache__/
 # Modèles lourds (optionnel : décommenter si trop grands)
 # pretrained_weights/
 # *.keras
+
+# Keras / HDF5 weight files (large binaries)
+*.h5
+weights/

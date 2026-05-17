@@ -5,6 +5,18 @@
 
 ---
 
+## ⚠️ Known Limitations (honest summary)
+
+| Limitation | Impact |
+|-----------|--------|
+| Drug features = random vectors (no PubChem SMILES mapping yet) | IC50 model learns from omics only, not molecular structure |
+| Mutations modality absent (MAF parsing issue) | 2/3 omics modalities used |
+| Validation split is random (not leave-drug-out) | Generalization to unseen drugs not proven |
+| No simple baseline (Ridge, RF) for comparison | Architectural benefit unquantified |
+| SA score missing from DQN reward | Synthetically inaccessible molecules not penalized |
+
+---
+
 ## Table of Contents
 
 1. [Project Overview](#1-project-overview)
@@ -528,15 +540,25 @@ A typical drug-like molecule (QED≈0.7, 2 arom. rings, Lipinski pass): R ≈ 2.
 |---------|--------|-------|-----------|---------|--------------|--------|-------------|
 | v1 | 25 seed | 33 (SMILES) | Initial implementation | ~2% | *(empty — decode bug)* | — | — |
 | v2 | 25 seed | 33 (SMILES) | Action masking | 50% | `P=P` (trivial) | 3.79 | — |
-| v3.0 | 25 seed | 54 (SELFIES) | **SELFIES representation** | 99.2% | polysulfide/cumulene | 3.67 | +1.2 |
+| v3.0 | 25 seed | 54 (SELFIES) | SELFIES representation | 99.2% | polysulfide/cumulene | 3.67 | +1.2 |
 | v3.1 | 25 seed | 54 (SELFIES) | carbon + cumul + arom filters | ~85% | stereocarbon chains | ~3.5 | — |
 | v3.2 | 10k ChEMBL | 95 (SELFIES) | corpus + size/repeat/stereo | **4%** | *(collapse)* | — | −2.0 |
 | v3.3 | 10k ChEMBL | 95 (SELFIES) | soft penalties, no early return | **87.5%** | `Cl[C+1]=[C+1]/S\Br` | 3.618 | +0.7 |
 | v3.4 | 10k ChEMBL | 91 (SELFIES) | charge + isotope + halogen | 72.2% | `I/[C@@]/[C@H1]=C\I` | 3.484 | ~0.0 |
 | v3.5 | 10k ChEMBL | 91 (SELFIES) | max_halogens=1 + alkyne penalty | 62.7% | `N/[C@@]\N/[C@@]\Br` | 2.354 | **−0.3** |
-| **v3.6** | **10k ChEMBL** | **91 (SELFIES)** | **qed×3 + acyclic_penalty** | *running* | *running* | *running* | *running* |
+| v3.6 | 10k ChEMBL | 91 (SELFIES) | qed×3 + acyclic_penalty | ~64% | stereochain + cyclopropane | ~2.7 | ~−0.3 |
+| v3.7 | 10k ChEMBL | 91 (SELFIES) | nonarom_penalty, max_repeat=4 | 57.6% | `[C@H1][C@@][N+1]/O\I.[C@H1]I` | **2.649** | **−0.4** |
+| v3.8 | 10k ChEMBL | 91 (SELFIES) | disconnect rejet, penalties×5 | 58.1% | `[C@]#SBr` | **−0.2** | −0.4 |
+| v3.9 | 10k ChEMBL | 37 (SELFIES) | vocab blacklist (regex) | 67.2% | `C\CP#S\[C@]#N` | 3.137 | −0.4 |
+| v3.10 | 10k ChEMBL | 50 (SELFIES) | vocab corpus-only whitelist | 66.8% | `Br\OC[OH0]/I` | 2.886 | −0.3 |
+| v3.11 | 10k ChEMBL | 50 (SELFIES) | post-decode atom check (Cl/Br/I) | 57.6% | `[N@@]\S\S\N/F` | 2.424 | −0.4 |
+| **v4.0** | **10k ChEMBL** | **~45 (SELFIES)** | **F banned + reward shaping + 10k ep** | *running* | *running* | *running* | *running* |
 
-**Trend analysis:** Each version closes a hacking loophole but risks reward starvation if penalties outpace positive signal. v3.3 found the best balance (87.5% valid, positive mean reward). v3.4–v3.5 tightened constraints too aggressively. v3.6 corrects this by raising `qed_weight` from 2.0 → 3.0 and adding a structural filter (`acyclic_penalty`) that steers toward rings without punishing the overall reward budget.
+**Trend analysis (v3.6–v4.0):** After v3.5, the critical insight was that the exploit source is not the *penalties* but the *vocabulary and SELFIES decoder*. Three structural issues were identified and fixed iteratively:
+
+1. **Disconnected fragments** (`SMILES with '.'`) — SELFIES can generate multi-component SMILES; RDKit validates each component independently giving artificially high QED. Fixed in v3.8 with immediate −1.0 rejection.
+2. **SELFIES decoder semantic drift** — even if a token (e.g. `[Br]`) is absent from the vocabulary, the SELFIES 2.x decoder can produce the corresponding atom from other token combinations. Vocab-level blacklisting alone is insufficient. Fixed in v3.11 with post-decode atomic number check.
+3. **Reward starvation vs. reward exploitation trade-off** — aggressive penalties (v3.8: `nonarom=−2.0`, `charge=−2.0/atom`) push `Moy50` permanently negative, preventing the DQN from learning any positive signal. The 2000-episode budget is insufficient for convergence when the density of positive-reward states is very low. v4.0 addresses this with reward shaping (+0.03/aromatic token during episode) and 10,000 episodes.
 
 ---
 
@@ -581,8 +603,8 @@ If KL < 10: posterior collapse (most dimensions unused). If KL > 100: VAE acts a
 
 Reward hacking is a well-documented failure mode in RL-based molecular generation (see Guimaraes et al. 2017, Olivecrona et al. 2017). The agent optimizes the proxy reward function, not the underlying scientific objective. Each version of the DQN revealed a new hacking strategy:
 
-| Version | Hacking strategy | Why it worked | Fix applied |
-|---------|-----------------|--------------|-------------|
+| Version | Hacking strategy | Root cause | Fix applied |
+|---------|-----------------|-----------|-------------|
 | v2 | `P=P`, `SSS` (trivial molecules) | Short sequences always valid; Lipinski MW satisfied | `min_heavy_atoms = 5` |
 | v3.0 | `[S+1]=[S+1]=[S+1]...` (polysulfides) | RDKit QED non-zero for charged S chains | `carbon_frac ≥ 0.25` |
 | v3.0 | `C=C=C=C=C=C=` (cumulenes) | Cyclic cumulenes pass Lipinski MW + ring count | `count(=C=) < 3` |
@@ -591,8 +613,18 @@ Reward hacking is a well-documented failure mode in RL-based molecular generatio
 | v3.3 | `Cl[C+1]=[C+1]/S\Br` (formal charges) | `[C+1]` alters QED Gaussian desirability values | `charge_penalty` −0.4/atom + isotope filter |
 | v3.4 | `I/[C@@]/[C@H1]=C\I` (diiodo scaffold) | 2 iodines at exactly `max_halogens=2` threshold | `max_halogens=1`, `alkyne_penalty` added |
 | v3.5 | `N/[C@@]\N/[C@@]\Br` (acyclic stereochain) | No rings → no `arom_bonus` deducted, fewest penalties | `acyclic_penalty=-0.6`, `qed_weight` 2.0→3.0 |
+| v3.7 | `[C@H1][C@@][N+1]/O\I.[C@H1]I` (disconnected fragment) | SELFIES generates multi-component SMILES (dot notation); RDKit validates each fragment independently | Immediate −1.0 if `'.' in smiles` (v3.8) |
+| v3.8 | `[C@]#SBr` (reward starvation, no positive signal) | `nonarom_penalty=−2.0` + `charge=−2.0/atom` → Moy50 permanently negative; agent learns nothing | Revert to soft penalties; filter vocab at source (v3.9) |
+| v3.9 | `C\CP#S\[C@]#N` (triple-bond sulfur) | Regex blacklist removed `Ring`/`Branch` tokens → only 37 tokens, no aromatic cycles possible | Corpus-only whitelist (v3.10) |
+| v3.10 | `Br\OC[OH0]/I` (Br/I despite vocab ban) | SELFIES 2.x decoder semantic substitution: absent tokens can appear via grammar expansion | Post-decode atomic number check `{17,35,53}` (v3.11) |
+| v3.11 | `[N@@]\S\S\N/F` (fluorine exploit) | F (atomicNum=9) still in vocab; 5-atom organofluorine has QED=0.325 → +0.97 QED×3 term | F added to forbidden set `{9,17,35,53}` (v4.0) |
+| v3.0–v3.11 | Best SMILES frozen after episode 50 | 2 000 episodes insufficient for DQN convergence when reward-positive states are sparse | 10 000 episodes + reward shaping +0.03/aromatic token (v4.0) |
 
-**General pattern:** Each fix increases the minimum quality bar, but risks reward starvation if positive signals do not compensate. The iterative process converges when: (1) the reward landscape has a single dominant positive mode (high QED + rings), and (2) all pathological shortcuts are penalized below that mode. v3.6 targets this balance explicitly.
+**General pattern:** Three distinct failure modes were identified across versions:
+
+- **Reward exploitation** (v2–v3.7): the agent finds a structural shortcut that scores high on the proxy reward but is chemically meaningless. Each fix narrows the exploit space.
+- **Reward starvation** (v3.2, v3.8): over-aggressive penalties push the entire reward landscape negative; the DQN gradient signal vanishes. Balance between positive terms and penalties is critical.
+- **Vocabulary-level leakage** (v3.9–v3.11): SELFIES 2.x grammar allows token combinations to decode into atoms not present in the vocabulary. Lexical filtering alone is insufficient — validation must happen at the decoded SMILES level via RDKit atom checks.
 
 ### 4.5 Transfer Learning Effect
 
@@ -665,7 +697,7 @@ Full ChEMBL 36 SDF: 2,854,815 compounds, 7.4 GB, stored at `Dataset/chembl_36.sd
 Twin/
 ├── fullPipeline.py              # Bi-Int model, QuatVAE, CCLE loader, QSAR training, PPO
 ├── chembl_pretrain.py           # GNN self-supervised pre-training on ChEMBL 100k
-├── dqn_optimizer.py             # Double DQN — SELFIES v3.6 (this work, current)
+├── dqn_optimizer.py             # Double DQN — SELFIES v4.0 (current)
 ├── graphga_biint_optimizer.py   # GraphGA evolutionary drug optimizer
 ├── reinvent_biint_optimizer.py  # REINVENT-style conditional policy gradient
 ├── reinvent_optimizer.py        # Simplified REINVENT
@@ -676,14 +708,21 @@ Twin/
 ├── pretrained_weights/
 │   ├── chembl_drug_encoder.weights.h5  # Transferred GNN weights (node_embed, gcn_proj_1, ln1, node_proj, ln2)
 │   └── pretrain_meta.json              # Descriptor normalization stats + training metadata
-├── dqn_weights_v2/
-│   ├── q_online.weights.h5      # DQN v2 online Q-network (char-level SMILES, deprecated)
-│   └── q_target.weights.h5      # DQN v2 target Q-network
-├── dqn_weights_v3/
-│   ├── q_online.weights.h5      # DQN v3 online Q-network (SELFIES)
-│   └── q_target.weights.h5      # DQN v3 target Q-network
+├── weights/                     # All DQN weight snapshots (gitignored — .h5 binaries)
+│   ├── dqn_weights_demo/        # Initial demo weights
+│   ├── dqn_weights_v2/          # v2 char-level SMILES (deprecated)
+│   ├── dqn_weights_v3/          # v3.0 SELFIES baseline
+│   ├── dqn_weights_v3.4/        # v3.4 charge/halogen penalties
+│   ├── dqn_weights_v3.5/        # v3.5 alkyne penalty
+│   ├── dqn_weights_v3.6/        # v3.6 acyclic penalty
+│   └── dqn_weights_v3.7/        # v3.7 nonarom penalty (exploit: disconnected fragments)
+├── archive/                     # Obsolete scripts kept for reference
+│   ├── chembl_pretrain_old.py   # First pretrain iteration
+│   └── chembl_pretrain_corrected.py  # Intermediate fix
+├── notebooks/
+│   └── evaluation.ipynb         # Training curves, GraphGA visualization, DQN version comparison
 ├── logs_chembl.txt              # ChEMBL pre-training full log (10 epochs)
-├── logs_dqn.txt                 # DQN training log (latest run)
+├── logs_dqn.txt                 # DQN training log (latest run — v4.0)
 ├── COMMANDES.md                 # Step-by-step Ubuntu execution commands
 ├── Dataset/
 │   ├── chembl_36.sdf            # ChEMBL 36 full SDF (2.85M molecules, 7.4 GB — gitignored)
@@ -720,13 +759,14 @@ python3 fullPipeline.py --no-ppo
 python3 fullPipeline.py --epochs 20
 ```
 
-### Step 4 — DQN Drug Generation (SELFIES v3.6)
+### Step 4 — DQN Drug Generation (SELFIES v4.0)
 ```bash
 nohup python3 dqn_optimizer.py > ~/Twin/logs_dqn.txt 2>&1 &
 tail -f ~/Twin/logs_dqn.txt
-# Extracts 10k SMILES from ChEMBL SDF, builds 91-token vocab (isotopes filtered)
-# 2000 episodes | ~10-20 min on RTX 4000
-# v3.6: qed_weight=3.0, acyclic_penalty=-0.6, no C#C, charge/halogen/isotope penalties
+# Extracts 10k SMILES from ChEMBL SDF, builds ~45-token corpus-only vocab
+# 10,000 episodes | ~40-60 min on RTX 4000
+# v4.0: F/Cl/Br/I banned post-decode, reward shaping +0.03/aromatic token,
+#        max_selfies_len=20, eps_decay_steps=20000
 ```
 
 ### Step 5 — GraphGA Optimization
@@ -744,17 +784,17 @@ ps aux | grep python | grep -v grep
 
 ## 9. RL Methods Comparison
 
-| | PPO | REINVENT | GraphGA | Double DQN v3.6 (this work) |
+| | PPO | REINVENT | GraphGA | Double DQN v4.0 (this work) |
 |---|---|---|---|---|
 | **Paradigm** | Policy gradient (on-policy) | Policy gradient (off-policy KL) | Evolutionary | Q-learning (off-policy) |
 | **Mol. representation** | char-level SMILES (LSTM) | char-level SMILES | Molecular graph | **SELFIES tokens** |
 | **Memory** | None (on-policy) | None | Population (50 mol.) | Replay buffer (20k transitions) |
-| **Exploration** | Entropy regularization | Temperature annealing | Mutation + crossover | ε-greedy: 1.0 → 0.05 |
-| **Validity guarantee** | ~70% (pre-trained policy) | ~80% (pre-trained) | ~90% | **100% (SELFIES)** |
-| **Stability** | High variance, collapse ~ep.70 | Medium variance | High | Target network prevents overestimation |
-| **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED×3 + LogP + Lipinski + arom + diversity + 7 structural penalties |
-| **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators) | Polysulfides → cumulenes → stereo chains → formal charges → diiodo → polynes → acyclic (each fixed iteratively) |
-| **Best results** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v3.3: 87.5% valid, R=3.618 \| v3.6: *running* |
+| **Exploration** | Entropy regularization | Temperature annealing | Mutation + crossover | ε-greedy: 1.0 → 0.05 / 20k steps |
+| **Validity guarantee** | ~70% (pre-trained policy) | ~80% (pre-trained) | ~90% | **~100% (SELFIES grammar)** |
+| **Stability** | High variance, collapse ~ep.70 | Medium variance | High | Target network prevents overestimation; reward starvation risk if penalties > positive signal |
+| **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED×3 + LogP + Lipinski + arom + diversity + reward shaping (v4.0) |
+| **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators) | 12 distinct exploits identified v2–v3.11; root causes: (1) soft penalties, (2) SELFIES decoder semantic drift, (3) insufficient episodes for convergence |
+| **Best honest result** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v3.3: 87.5% valid, R=3.618 (pre-exploit-fix) — v4.0 in progress |
 | **Corpus for generation** | 25 seed SMILES | — | — | **10,000 ChEMBL SMILES (QED≥0.3)** |
 
 ---
@@ -768,8 +808,9 @@ ps aux | grep python | grep -v grep
 | Drug features are random vectors | No SMILES→CCLE drug ID mapping available | Drug encoder learns noise; IC50 model generalizes less to unseen drugs |
 | Mutations modality absent | MAF format incompatible with default pandas parser | 3rd omics axis missing; model uses only GEx + CNA |
 | ChEMBL pre-training on 100k / 2.8M | WSL2 RAM limit (OOM at 500k) | GNN sees only 3.5% of available chemical space |
-| DQN reward hacking (v3.0–v3.6) | Proxy reward ≠ true drug quality; 7 hacking strategies identified and patched iteratively | SA score (synthetic accessibility) still missing; would close most remaining loopholes |
-| No SA score in reward | sascorer.py not integrated | Agent not penalized for synthetically inaccessible molecules |
+| DQN reward hacking (v3.0–v3.11, 12 exploits) | Proxy reward ≠ true drug quality; SELFIES decoder semantic drift generates forbidden atoms even without their tokens in the vocabulary | Post-decode RDKit atomic check now mandatory; SA score still missing |
+| No SA score in reward | sascorer.py not integrated | Agent not penalized for synthetically inaccessible molecules (SA > 4.0) |
+| DQN convergence insufficient (v3.x) | 2,000 episodes too short when reward-positive states are sparse; best SMILES frozen from episode 50 | v4.0 uses 10,000 episodes + reward shaping; full convergence not yet demonstrated |
 
 ### Prioritized Next Steps
 
@@ -804,3 +845,11 @@ ps aux | grep python | grep -v grep
 
 *All experiments run on Ubuntu 24.04 LTS (WSL2) with NVIDIA RTX 4000 Ada (17,710 MB VRAM), TensorFlow 2.21.0, SELFIES 2.1.1, RDKit 2024.*
 *Source code: `fullPipeline.py` (model + CCLE loader), `chembl_pretrain.py` (GNN pre-training), `dqn_optimizer.py` (DQN v3.6).*
+
+---
+
+## Notebooks
+
+| Notebook | Description |
+|----------|-------------|
+| `notebooks/evaluation.ipynb` | Training curves, GraphGA candidates visualization, DQN version comparison |

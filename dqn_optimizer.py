@@ -1,6 +1,6 @@
 r"""
 ================================================================================
-  DQN Drug Optimizer -- SELFIES v3.7  -- Bi-Int Digital Twin
+  DQN Drug Optimizer -- SELFIES v4.0 -- Bi-Int Digital Twin
 ================================================================================
 
 Historique des versions :
@@ -18,7 +18,37 @@ Historique des versions :
     - max_token_repeat 8 -> 4  (limite repetition du meme token)
     - repeat_penalty_coef 0.1 -> 0.3  (penalite plus forte par repetition)
     - arom_bonus 0.8 -> 1.2  (recompense plus forte pour les aromatiques)
-    - acyclic_penalty remplace par nonarom_penalty
+    - BUG : fragments disconnectes acceptes (SMILES avec '.'), iode x2 autorise
+  v3.8 : Bloquer les exploits de fragments disconnectes + renforcer penalites
+    - Rejet immediat (-1.0) si SMILES contient '.' (fragment disconnecte)
+    - max_halogens 2 -> 0  (aucun halogene tolere)
+    - charge_penalty_coef 0.4 -> 2.0  (charges = rejet quasi-certain)
+    - nonarom_penalty -0.5 -> -2.0  (sans aromatique = forte penalite)
+    - PROBLEME : reward starvation — penalites trop fortes, signal positif absent
+    - Vocab contient encore Br/F/charges via filtre trop permissif ("r", "F")
+  v3.9 : Filtrage vocab a la source + penalites equilibrees
+    - SELFIESVocabulary filtre les tokens halogenes/charges/stereo a la construction
+    - Retrait de F, Cl, Br, I, [+], [-] du vocab directement
+    - nonarom_penalty revient a -0.5 (penalite douce, pas bloquante)
+    - PROBLEME : regex blacklist trop large — a retire Ring/Branch -> 37 tokens
+    - Paracetamol encode en CCC=O : cycles aromatiques impossibles
+    - Exploit C\CP#S\[C@]#N : triple liaison soufre acceptee par RDKit
+  v3.10 : Whitelist corpus-only + blacklist chirurgicale
+    - token_set construit uniquement depuis le corpus ChEMBL drug-like (pas d'alphabet)
+    - Blacklist ciblee : Cl, Br, I, charges [+-], isotopes, metaux
+    - Ring1/Ring2/Branch1/Branch2 conserves (essentiels aux cycles)
+    - PROBLEME : SELFIES decoder peut produire Br/I meme sans leurs tokens dans le vocab
+    - Exploit Br\OC[OH0]/I : [F] token -> decode parfois en Br ou I via semantique SELFIES
+  v3.11 : Rejet hard post-decode sur atomes interdits
+    - Apres MolFromSmiles, verifier les numeros atomiques : Cl(17)/Br(35)/I(53) -> -1.0
+    - PROBLEME residuel : F (atomicNum=9) toujours dans le vocab -> exploit [N@@]\S\S\N/F
+    - Cause structurelle : 2000 episodes trop court pour converger (Moy50 jamais positif)
+    - Best SMILES trouve ep 1-50 et fige -> agent n explore pas, il garde le 1er coup de chance
+  v4.0 : Refonte structurelle — F retire, reward shaping, 10k episodes
+    - F retire du vocab ET du rejet post-decode (forbidden={9,17,35,53})
+    - Reward shaping : +0.05 par token aromatique [=C]/[=N] durant l episode
+    - n_episodes 2000 -> 10000, eps_decay_steps 8000 -> 20000
+    - max_selfies_len 30 -> 20 (molecules plus courtes = plus facile a apprendre)
 
 References :
   Krenn et al., "SELFIES", Mach. Learn.: Sci. Technol. 2020.
@@ -172,10 +202,10 @@ DQN_HP = dict(
     lr                 = 3e-4,
     eps_start          = 1.0,
     eps_end            = 0.05,
-    eps_decay_steps    = 8_000,
+    eps_decay_steps    = 20_000,   # v4.0: exploration plus longue
     target_update_freq = 200,
-    max_selfies_len    = 30,
-    n_episodes         = 2_000,
+    max_selfies_len    = 20,       # v4.0: molecules courtes = plus facile a apprendre
+    n_episodes         = 10_000,   # v4.0: 5x plus d'episodes pour converger
     hidden_dim         = 256,
     target_ic50        = -1.5,
     # ── Récompenses positives (v3.7)
@@ -193,17 +223,17 @@ DQN_HP = dict(
     max_heavy_atoms    = 30,
     repeat_penalty_coef= 0.3,    # renforcé (était 0.1)
     max_token_repeat   = 4,      # réduit (était 8) : bloque [C@@H1]×5+
-    stereo_penalty_coef= 0.05,
-    max_stereo_centers = 12,
-    # ── Pénalités drug-likeness v3.4+
-    charge_penalty_coef   = 0.4,
+    stereo_penalty_coef= 0.15,    # v3.9: modéré
+    max_stereo_centers = 4,       # v3.9: raisonnable
+    # ── Pénalités drug-likeness
+    charge_penalty_coef   = 0.4,  # v3.9: retour valeur saine (vocab filtre les charges)
     isotope_penalty       = -0.5,
     halogen_penalty_coef  = 0.4,
-    max_halogens          = 2,
+    max_halogens          = 1,    # v3.9: 1 halogène toléré (F médicinal courant)
     alkyne_penalty_coef   = 0.5,
     max_alkynes           = 0,
-    # ── Pénalité v3.7 : pas de cycle aromatique (remplace acyclic_penalty)
-    nonarom_penalty       = -0.5,  # si aucun cycle aromatique (benzène, pyridine...)
+    # ── Pénalité v3.9 : pas de cycle aromatique (douce — signal pas bloquant)
+    nonarom_penalty       = -0.5,  # v3.9: retour valeur saine
     log_interval          = 50,
 )
 
@@ -223,24 +253,25 @@ class SELFIESVocabulary:
             except Exception:
                 pass
 
-        # Tokens du corpus
+        # v3.9 — Whitelist stricte : uniquement les tokens du corpus ChEMBL drug-like
+        # On prend les tokens qui apparaissent réellement dans les SMILES drug-like,
+        # puis on retire les tokens non-drug (halogènes lourds, charges, isotopes).
         token_set = set()
         for sel in selfies_list:
             for tok in sf.split_selfies(sel):
                 token_set.add(tok)
 
-        # Compléter avec l'alphabet standard, filtré drug-like
-        try:
-            for tok in sf.get_semantic_robust_alphabet():
-                if any(a in tok for a in ["C", "N", "O", "S", "F", "l", "r", "Ring", "Branch", "nop"]):
-                    if not any(x in tok for x in ["Si", "Se", "Te", "Sn", "Pb", "As", "Ge", "[B", "B]", "[P", "P]"]):
-                        token_set.add(tok)
-        except Exception:
-            pass
-
-        # Retirer les tokens isotopiques (ex: [11C], [125I], [14CH2]) — v3.7
-        _isotope_re = re.compile(r"\[\d+")
-        token_set = {t for t in token_set if not _isotope_re.search(t)}
+        # Tokens interdits : halogènes lourds, charges formelles, isotopes, métaux
+        _BANNED = re.compile(
+            r"\[Cl"         # chlore
+            r"|\[Br"        # brome
+            r"|\[I[^n]"     # iode (mais pas [In] = indium, absent de toute façon)
+            r"|\[.*[+\-]\d*\]"   # charges formelles : [N+1], [C-1], [NH2+], etc.
+            r"|\[\d+"        # isotopes : [11C], [125I]
+            r"|\[Si"  r"|\[Se"  r"|\[Te"  r"|\[Sn"
+            r"|\[Pb"  r"|\[As"  r"|\[Ge"  r"|\[B\b" r"|\[P\b"
+        )
+        token_set = {t for t in token_set if not _BANNED.search(t)}
 
         token_set.discard(self.END_TOKEN)
         token_set.discard(self.PAD_TOKEN)
@@ -345,7 +376,12 @@ class SELFIESEnv:
         self.tokens.append(action)
         self.step_count += 1
         done = (action == self.vocab.END_IDX) or (self.step_count >= self.max_len)
-        reward = self._compute_reward() if done else 0.0
+        if done:
+            reward = self._compute_reward()
+        else:
+            # v4.0 reward shaping : petit signal positif par token aromatique
+            tok = self.vocab.idx2tok[action] if action < self.vocab.vocab_size else ""
+            reward = 0.03 if tok in ("[=C]", "[=N]", "[Ring1]", "[Ring2]") else 0.0
         return self._state(action), reward, done
 
     def _compute_reward(self) -> float:
@@ -353,9 +389,19 @@ class SELFIESEnv:
         if not smiles:
             return -0.5
 
+        # Rejeter les fragments disconnectés
+        if '.' in smiles:
+            return -1.0
+
         mol = Chem.MolFromSmiles(smiles) if HAS_RDKIT else None
         if mol is None:
             return -0.5
+
+        # v4.0 — Rejet hard : F/Cl/Br/I tous interdits (F=9 aussi — exploit v4.0)
+        _FORBIDDEN_ATOMS = {9, 17, 35, 53}  # F, Cl, Br, I
+        atom_nums_set = {a.GetAtomicNum() for a in mol.GetAtoms()}
+        if atom_nums_set & _FORBIDDEN_ATOMS:
+            return -1.0
 
         n_heavy = mol.GetNumHeavyAtoms()
         if n_heavy < 5:
@@ -508,7 +554,7 @@ class DQNDrugOptimizer:
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN-SELFIES v3.7] state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"[DQN-SELFIES v4.0] state_dim={state_dim} | vocab_size={vocab_size}")
 
     def _sync_target(self):
         self.q_target.set_weights(self.q_online.get_weights())
@@ -561,7 +607,7 @@ class DQNDrugOptimizer:
 
         rewards_hist, valid_count, top_mols = [], 0, []
 
-        print(f"\n[DQN v3.7] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
+        print(f"\n[DQN v4.0] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
         print(f"  ε: {self.hp['eps_start']} → {self.hp['eps_end']} / {self.hp['eps_decay_steps']} steps")
         print(f"  Penalites : taille(>{self.hp['max_heavy_atoms']}) | "
               f"repetition(>{self.hp['max_token_repeat']}x, -{self.hp['repeat_penalty_coef']}/exc) | "
@@ -619,7 +665,7 @@ class DQNDrugOptimizer:
                       f"Valid={100*valid_count/ep:.1f}% | Loss={mean_l:.4f} | "
                       f"Best: {self.best_smiles[:40]!s:40s} ({self.best_reward:.3f})")
 
-        print(f"\n[DQN v3.7] Terminé.")
+        print(f"\n[DQN v4.0] Terminé.")
         print(f"  Meilleur SMILES  : {self.best_smiles}")
         print(f"  Meilleure reward : {self.best_reward:.4f}")
         print(f"  Valides          : {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
@@ -645,7 +691,7 @@ class DQNDrugOptimizer:
 # ─── Point d'entrée ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print("  DQN Drug Optimizer v3.7 — SELFIES + ChEMBL 10k corpus")
+    print("  DQN Drug Optimizer v4.0 — SELFIES + ChEMBL 10k corpus")
     print("=" * 70)
 
     # 1. Charger corpus ChEMBL
@@ -679,4 +725,4 @@ if __name__ == "__main__":
     print(f"  Valides         : {result['valid_count']}/{DQN_HP['n_episodes']} "
           f"({100*result['valid_count']/DQN_HP['n_episodes']:.1f}%)")
 
-    agent.save_weights("dqn_weights_v3.7")
+    agent.save_weights("dqn_weights_v4.0")

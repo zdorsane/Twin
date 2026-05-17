@@ -622,7 +622,8 @@ class BiIntTrainer:
                 'val_rmse': rmse}
 
     def fit(self, train_ds, val_ds, epochs=50):
-        history = {'train': [], 'val': []}
+        from scipy.stats import pearsonr as _pearsonr
+        history = {'train': [], 'val': [], 'pearson_r': []}
         for epoch in range(1, epochs + 1):
             train_metrics = {}
             for batch in train_ds:
@@ -631,19 +632,34 @@ class BiIntTrainer:
                     train_metrics.setdefault(k, []).append(v.numpy())
 
             val_metrics = {}
+            y_true_all, y_pred_all = [], []
             for batch in val_ds:
-                metrics = self.val_step(batch)
-                for k, v in metrics.items():
-                    val_metrics.setdefault(k, []).append(v.numpy())
+                drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
+                ic50_pred, kl_loss = self.model(
+                    (drug_atoms, adj_mask, gex, mut, cnv), training=False)
+                regression_loss = self.mse(ic50_true, ic50_pred)
+                rmse = tf.sqrt(regression_loss)
+                val_metrics.setdefault('val_loss', []).append(
+                    (regression_loss + self.hp['vae_beta'] * kl_loss).numpy())
+                val_metrics.setdefault('val_rmse', []).append(rmse.numpy())
+                y_true_all.extend(ic50_true.numpy().tolist())
+                y_pred_all.extend(ic50_pred.numpy().ravel().tolist())
 
             t_rmse = np.mean(train_metrics['rmse'])
             v_rmse = np.mean(val_metrics['val_rmse'])
             history['train'].append(t_rmse)
             history['val'].append(v_rmse)
 
+            # Pearson r over the full validation set
+            pr = 0.0
+            if len(y_true_all) > 1:
+                pr, _ = _pearsonr(y_true_all, y_pred_all)
+            history['pearson_r'].append(float(pr))
+
             if epoch % 5 == 0 or epoch == 1:
                 print(f"Epoch {epoch:3d} | Train RMSE: {t_rmse:.4f} | "
-                      f"Val RMSE: {v_rmse:.4f} | KL: {np.mean(train_metrics['kl_loss']):.4f}")
+                      f"Val RMSE: {v_rmse:.4f} | Pearson r: {pr:.4f} | "
+                      f"KL: {np.mean(train_metrics['kl_loss']):.4f}")
         return history
 
 
@@ -1101,6 +1117,7 @@ def load_ccle_real_data(
     val_split=0.15,
     batch_size=HP['batch_size'],
     random_seed=42,
+    split_mode='random',   # 'random' | 'leave_drug_out' | 'leave_cell_out'
 ):
     """
     Charge les vraies données CCLE :
@@ -1231,10 +1248,46 @@ def load_ccle_real_data(
     ic50_arr = (ic50_arr - ic50_mean) / ic50_std
 
     # Shuffle & split
-    rng = np.random.default_rng(random_seed)
-    idx = rng.permutation(n)
-    split = int((1 - val_split) * n)
-    tr, va = idx[:split], idx[split:]
+    if split_mode == 'leave_drug_out':
+        sorted_drugs = sorted(set(drug_ids))
+        n_val_drugs  = max(1, int(len(sorted_drugs) * val_split))
+        train_drug_set = set(sorted_drugs[:-n_val_drugs])
+        val_drug_set   = set(sorted_drugs[-n_val_drugs:])
+        # Map each sample to its drug_id
+        # samples_atoms was built iterating drug_ids × common_cells in order
+        # Rebuild the sample→drug_id array from the same iteration order
+        sample_drug_ids = []
+        for drug_id in drug_ids:
+            for ci, cell in enumerate(common_cells):
+                ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
+                if not np.isnan(ic50_val):
+                    sample_drug_ids.append(drug_id)
+        sample_drug_ids = np.array(sample_drug_ids)
+        tr = np.where(np.isin(sample_drug_ids, list(train_drug_set)))[0]
+        va = np.where(np.isin(sample_drug_ids, list(val_drug_set)))[0]
+        print(f"  Leave-drug-out split : {len(train_drug_set)} train drugs | {len(val_drug_set)} val drugs")
+
+    elif split_mode == 'leave_cell_out':
+        sorted_cells = sorted(common_cells)
+        n_val_cells  = max(1, int(len(sorted_cells) * val_split))
+        train_cell_set = set(sorted_cells[:-n_val_cells])
+        val_cell_set   = set(sorted_cells[-n_val_cells:])
+        sample_cells = []
+        for drug_id in drug_ids:
+            for ci, cell in enumerate(common_cells):
+                ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
+                if not np.isnan(ic50_val):
+                    sample_cells.append(cell)
+        sample_cells = np.array(sample_cells)
+        tr = np.where(np.isin(sample_cells, list(train_cell_set)))[0]
+        va = np.where(np.isin(sample_cells, list(val_cell_set)))[0]
+        print(f"  Leave-cell-out split : {len(train_cell_set)} train cells | {len(val_cell_set)} val cells")
+
+    else:  # 'random'
+        rng = np.random.default_rng(random_seed)
+        idx = rng.permutation(n)
+        split = int((1 - val_split) * n)
+        tr, va = idx[:split], idx[split:]
 
     def make_real_ds(indices):
         ds = tf.data.Dataset.from_tensor_slices((
