@@ -1,6 +1,6 @@
 r"""
 ================================================================================
-  DQN Drug Optimizer -- SELFIES v3.6  -- Bi-Int Digital Twin
+  DQN Drug Optimizer -- SELFIES v3.7  -- Bi-Int Digital Twin
 ================================================================================
 
 Historique des versions :
@@ -9,15 +9,16 @@ Historique des versions :
   v3.2 : +repeat/stereo/size penalties -> collapse reward (4% valides)
   v3.3 : penalites douces -> 87.5% valides, charges/halogenes exploites
   v3.4 : +charge/isotope/halogen penalties -> 72.2% valides
-  v3.6 : +alkyne penalty, max_halogens=1 -> 62.7% valides, reward starvation
-         (mean reward negatif, stereocha ines de retour sans cycles)
-  v3.6 : Rebalancement reward positif + filtre cycles obligatoire
-    - qed_weight 2.0 -> 3.0  (signal positif dominant)
-    - acyclic_penalty -0.6 si aucun cycle  (oblige les structures cycliques)
-    - ring_bonus : deja present via arom_bonus, renforce par acyclic_penalty
-    - stereo_penalty_coef 0.1 -> 0.05, max_stereo_centers 8 -> 12
-    - max_alkynes 1 -> 0  (aucun C#C carbone-carbone tolere)
-    - max_halogens 1 -> 2  (assouplit pour eviter reward starvation)
+  v3.5 : +alkyne penalty, max_halogens=1 -> 62.7% valides, reward starvation
+  v3.7 : qed*3 + acyclic_penalty -> 64.2% valides, stereochain+cyclopropane
+         Probleme : agent evite acyclic_penalty avec petit cycle aliphatique
+         [C@@H1] chaine reste dominant car max_token_repeat trop permissif
+  v3.7 : Forcer les aromatiques + punir stereo-CH en chaine
+    - nonarom_penalty=-0.5 si aucun cycle AROMATIQUE (cyclopropane ne suffit plus)
+    - max_token_repeat 8 -> 4  (limite repetition du meme token)
+    - repeat_penalty_coef 0.1 -> 0.3  (penalite plus forte par repetition)
+    - arom_bonus 0.8 -> 1.2  (recompense plus forte pour les aromatiques)
+    - acyclic_penalty remplace par nonarom_penalty
 
 References :
   Krenn et al., "SELFIES", Mach. Learn.: Sci. Technol. 2020.
@@ -177,32 +178,32 @@ DQN_HP = dict(
     n_episodes         = 2_000,
     hidden_dim         = 256,
     target_ic50        = -1.5,
-    # ── Récompenses positives (v3.6 : qed_weight renforcé)
-    qed_weight         = 3.0,    # augmenté (était 2.0)
+    # ── Récompenses positives (v3.7)
+    qed_weight         = 3.0,
     logp_weight        = 0.5,
     lipinski_bonus     = 1.0,
     ic50_weight        = 0.8,
     diversity_weight   = 0.4,
-    arom_bonus         = 0.8,
-    # ── Pénalités chimiques v3.3
+    arom_bonus         = 1.2,    # augmenté (était 0.8) : forte récompense aromatique
+    # ── Pénalités chimiques
     carbon_penalty     = -0.5,
     cumul_penalty      = -0.5,
     min_carbon_frac    = 0.25,
     size_penalty_coef  = 0.05,
     max_heavy_atoms    = 30,
-    repeat_penalty_coef= 0.1,
-    max_token_repeat   = 8,
-    stereo_penalty_coef= 0.05,   # assoupli (était 0.1)
-    max_stereo_centers = 12,     # assoupli (était 8)
+    repeat_penalty_coef= 0.3,    # renforcé (était 0.1)
+    max_token_repeat   = 4,      # réduit (était 8) : bloque [C@@H1]×5+
+    stereo_penalty_coef= 0.05,
+    max_stereo_centers = 12,
     # ── Pénalités drug-likeness v3.4+
     charge_penalty_coef   = 0.4,
     isotope_penalty       = -0.5,
-    halogen_penalty_coef  = 0.4,   # assoupli (était 0.5)
-    max_halogens          = 2,     # assoupli (était 1)
-    alkyne_penalty_coef   = 0.5,   # renforcé (était 0.4)
-    max_alkynes           = 0,     # 0 : aucun C#C carbone-carbone tolere
-    # ── Pénalité v3.6 : molécule acyclique
-    acyclic_penalty       = -0.6,  # si aucun cycle (ni aromatique ni aliphatique)
+    halogen_penalty_coef  = 0.4,
+    max_halogens          = 2,
+    alkyne_penalty_coef   = 0.5,
+    max_alkynes           = 0,
+    # ── Pénalité v3.7 : pas de cycle aromatique (remplace acyclic_penalty)
+    nonarom_penalty       = -0.5,  # si aucun cycle aromatique (benzène, pyridine...)
     log_interval          = 50,
 )
 
@@ -237,7 +238,7 @@ class SELFIESVocabulary:
         except Exception:
             pass
 
-        # Retirer les tokens isotopiques (ex: [11C], [125I], [14CH2]) — v3.6
+        # Retirer les tokens isotopiques (ex: [11C], [125I], [14CH2]) — v3.7
         _isotope_re = re.compile(r"\[\d+")
         token_set = {t for t in token_set if not _isotope_re.search(t)}
 
@@ -389,7 +390,7 @@ class SELFIESEnv:
         if stereo_count > self.hp["max_stereo_centers"]:
             penalties -= (stereo_count - self.hp["max_stereo_centers"]) * self.hp["stereo_penalty_coef"]
 
-        # ── Pénalités drug-likeness v3.6 ──────────────────────────────────────
+        # ── Pénalités drug-likeness v3.7 ──────────────────────────────────────
         # Charges formelles (Cl[C+1]=[C+1]... exploitation)
         charged_atoms = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() != 0)
         if charged_atoms > 0:
@@ -416,11 +417,11 @@ class SELFIESEnv:
         if n_alkynes > self.hp["max_alkynes"]:
             penalties -= (n_alkynes - self.hp["max_alkynes"]) * self.hp["alkyne_penalty_coef"]
 
-        # Molécule acyclique — aucun cycle ni aromatique ni aliphatique (v3.6)
+        # Pas de cycle aromatique — cyclopropane ne suffit plus (v3.7)
         try:
-            ring_info = mol.GetRingInfo()
-            if ring_info.NumRings() == 0:
-                penalties += self.hp["acyclic_penalty"]   # valeur négative
+            n_arom_rings = rdMolDescriptors.CalcNumAromaticRings(mol)
+            if n_arom_rings == 0:
+                penalties += self.hp["nonarom_penalty"]   # valeur négative
         except Exception:
             pass
 
@@ -507,7 +508,7 @@ class DQNDrugOptimizer:
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN-SELFIES v3.6] state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"[DQN-SELFIES v3.7] state_dim={state_dim} | vocab_size={vocab_size}")
 
     def _sync_target(self):
         self.q_target.set_weights(self.q_online.get_weights())
@@ -560,14 +561,15 @@ class DQNDrugOptimizer:
 
         rewards_hist, valid_count, top_mols = [], 0, []
 
-        print(f"\n[DQN v3.6] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
+        print(f"\n[DQN v3.7] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
         print(f"  ε: {self.hp['eps_start']} → {self.hp['eps_end']} / {self.hp['eps_decay_steps']} steps")
-        print(f"  Penalites : taille(>{self.hp['max_heavy_atoms']} atomes) | "
-              f"repetition(>{self.hp['max_token_repeat']}x) | "
-              f"stereo(>{self.hp['max_stereo_centers']} centres) | "
+        print(f"  Penalites : taille(>{self.hp['max_heavy_atoms']}) | "
+              f"repetition(>{self.hp['max_token_repeat']}x, -{self.hp['repeat_penalty_coef']}/exc) | "
+              f"stereo(>{self.hp['max_stereo_centers']}) | "
               f"charges(-{self.hp['charge_penalty_coef']}/atome) | "
               f"halogenes(>{self.hp['max_halogens']}) | "
-              f"polynes(>{self.hp['max_alkynes']} C#C)\n")
+              f"polynes(>{self.hp['max_alkynes']} C#C) | "
+              f"sans_arom({self.hp['nonarom_penalty']})\n")
 
         for ep in range(1, n_episodes + 1):
             env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
@@ -617,7 +619,7 @@ class DQNDrugOptimizer:
                       f"Valid={100*valid_count/ep:.1f}% | Loss={mean_l:.4f} | "
                       f"Best: {self.best_smiles[:40]!s:40s} ({self.best_reward:.3f})")
 
-        print(f"\n[DQN v3.6] Terminé.")
+        print(f"\n[DQN v3.7] Terminé.")
         print(f"  Meilleur SMILES  : {self.best_smiles}")
         print(f"  Meilleure reward : {self.best_reward:.4f}")
         print(f"  Valides          : {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
@@ -643,7 +645,7 @@ class DQNDrugOptimizer:
 # ─── Point d'entrée ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print("  DQN Drug Optimizer v3.6 — SELFIES + ChEMBL 10k corpus")
+    print("  DQN Drug Optimizer v3.7 — SELFIES + ChEMBL 10k corpus")
     print("=" * 70)
 
     # 1. Charger corpus ChEMBL
@@ -677,4 +679,4 @@ if __name__ == "__main__":
     print(f"  Valides         : {result['valid_count']}/{DQN_HP['n_episodes']} "
           f"({100*result['valid_count']/DQN_HP['n_episodes']:.1f}%)")
 
-    agent.save_weights("dqn_weights_v3.6")
+    agent.save_weights("dqn_weights_v3.7")
