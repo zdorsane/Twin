@@ -163,18 +163,19 @@ DQN_HP = dict(
     lipinski_bonus     = 1.0,
     ic50_weight        = 0.8,
     diversity_weight   = 0.4,
-    arom_bonus         = 0.8,    # bonus cycles aromatiques (max 3 cycles)
-    # ── Pénalités chimiques (v3.1)
-    carbon_penalty     = -1.5,   # molécule sans assez de carbones
-    cumul_penalty      = -1.0,   # cumulènes =C=C=C=
-    min_carbon_frac    = 0.3,
-    # ── Pénalités structurelles (v3.2 — nouvelles)
-    size_penalty_coef  = 0.15,   # -0.15 par atome au-delà de 25
-    max_heavy_atoms    = 25,
-    repeat_penalty_coef= 0.4,    # -0.4 par répétition au-delà de 4
-    max_token_repeat   = 4,
-    stereo_penalty_coef= 0.3,    # -0.3 par centre stéréo au-delà de 6
-    max_stereo_centers = 6,
+    arom_bonus         = 0.8,
+    # ── Pénalités chimiques (v3.3 — douces, jamais de retour anticipé)
+    # Règle : toutes les pénalités sont des déductions sur un reward positif,
+    # jamais des retours à -2.0 qui noient le signal.
+    carbon_penalty     = -0.5,   # réduit (était -1.5) : molécule sans carbone
+    cumul_penalty      = -0.5,   # réduit (était -1.0) : cumulènes
+    min_carbon_frac    = 0.25,   # assoupli (était 0.3)
+    size_penalty_coef  = 0.05,   # réduit (était 0.15) : -0.05/atome > 30
+    max_heavy_atoms    = 30,     # augmenté (était 25)
+    repeat_penalty_coef= 0.1,    # réduit (était 0.4) : -0.1/répétition > 8
+    max_token_repeat   = 8,      # assoupli (était 4)
+    stereo_penalty_coef= 0.1,    # réduit (était 0.3) : -0.1/centre > 8
+    max_stereo_centers = 8,      # assoupli (était 6)
     log_interval       = 50,
 )
 
@@ -320,48 +321,42 @@ class SELFIESEnv:
         if not smiles:
             return -0.5
 
-        # ── Pénalité répétition token (v3.2)
-        counts = collections.Counter(self.tokens)
-        max_rep = max(counts.values()) if counts else 0
-        rep_pen = 0.0
-        if max_rep > self.hp["max_token_repeat"]:
-            rep_pen = -(max_rep - self.hp["max_token_repeat"]) * self.hp["repeat_penalty_coef"]
-
-        # ── Pénalité stéréochimie excessive (v3.2)
-        stereo_count = sum(counts[i] for i in self.vocab.stereo_idxs if i in counts)
-        stereo_pen = 0.0
-        if stereo_count > self.hp["max_stereo_centers"]:
-            stereo_pen = -(stereo_count - self.hp["max_stereo_centers"]) * self.hp["stereo_penalty_coef"]
-
-        # Si pénalités structurelles très fortes, retour anticipé
-        if rep_pen + stereo_pen < -1.5:
-            return float(np.clip(rep_pen + stereo_pen, -2.0, 0.0))
-
         mol = Chem.MolFromSmiles(smiles) if HAS_RDKIT else None
         if mol is None:
-            return -0.5 + rep_pen + stereo_pen
+            return -0.5
 
         n_heavy = mol.GetNumHeavyAtoms()
-
-        # Filtre taille minimale
         if n_heavy < 5:
             return -0.2
 
-        # ── Pénalité taille excessive (v3.2)
-        size_pen = 0.0
-        if n_heavy > self.hp["max_heavy_atoms"]:
-            size_pen = -(n_heavy - self.hp["max_heavy_atoms"]) * self.hp["size_penalty_coef"]
+        # ── Pénalités douces (déductions, jamais de retour anticipé)
+        penalties = 0.0
 
-        # Filtre fraction carbone (v3.1)
+        # Fraction carbone insuffisante
         atom_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
         n_carbon  = atom_nums.count(6)
         if n_carbon == 0 or (n_carbon / n_heavy) < self.hp["min_carbon_frac"]:
-            return float(self.hp["carbon_penalty"]) + rep_pen + stereo_pen
+            penalties += self.hp["carbon_penalty"]   # -0.5
 
-        # Filtre cumulènes (v3.1)
+        # Cumulènes
         can_smi = Chem.MolToSmiles(mol)
         if can_smi.count("=C=") + can_smi.count("=c=") >= 3:
-            return float(self.hp["cumul_penalty"]) + rep_pen + stereo_pen
+            penalties += self.hp["cumul_penalty"]    # -0.5
+
+        # Taille excessive
+        if n_heavy > self.hp["max_heavy_atoms"]:
+            penalties -= (n_heavy - self.hp["max_heavy_atoms"]) * self.hp["size_penalty_coef"]
+
+        # Répétition token
+        counts  = collections.Counter(self.tokens)
+        max_rep = max(counts.values()) if counts else 0
+        if max_rep > self.hp["max_token_repeat"]:
+            penalties -= (max_rep - self.hp["max_token_repeat"]) * self.hp["repeat_penalty_coef"]
+
+        # Stéréochimie excessive
+        stereo_count = sum(counts[i] for i in self.vocab.stereo_idxs if i in counts)
+        if stereo_count > self.hp["max_stereo_centers"]:
+            penalties -= (stereo_count - self.hp["max_stereo_centers"]) * self.hp["stereo_penalty_coef"]
 
         reward = 0.0
 
@@ -419,8 +414,7 @@ class SELFIESEnv:
             except Exception:
                 pass
 
-        total = reward + rep_pen + stereo_pen + size_pen
-        return float(np.clip(total, -2.0, 10.0))
+        return float(np.clip(reward + penalties, -1.0, 10.0))
 
     @property
     def current_smiles(self) -> str:
