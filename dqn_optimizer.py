@@ -1,18 +1,18 @@
 """
 ================================================================================
-  DQN Drug Optimizer — SELFIES-based (v3)  — Bi-Int Digital Twin
+  DQN Drug Optimizer — SELFIES v3.2  — Bi-Int Digital Twin
 ================================================================================
 
-Architecture :
-  - Espace d'action  : tokens SELFIES (Self-Referencing Embedded Strings)
-                       → 100% des séquences produisent des molécules valides
-  - Etat (state)     : z_omics (OmicsVAE latent) ‖ one-hot(dernier token)
-  - Récompense       : QED + LogP + Lipinski + IC50 + diversité Tanimoto
-  - Pas de masking   : SELFIES est grammaticalement clos par construction
+Améliorations v3.2 vs v3.1 :
+  - Corpus 10 000 SMILES extraits de ChEMBL (vs 25 seed SMILES)
+  - Vocab SELFIES enrichi (~150+ tokens drug-like réels)
+  - Pénalité longueur excessive  (>25 atomes lourds)
+  - Pénalité répétition tokens   (même token >4 fois)
+  - Pénalité stéréochimie excess (>6 centres stéréo)
+  - Maintien des filtres v3.1    (carbon_frac, cumul, arom_bonus)
 
 Références :
-  Krenn et al., "Self-Referencing Embedded Strings (SELFIES)", Machine Learning:
-    Science and Technology, 2020.
+  Krenn et al., "SELFIES", Mach. Learn.: Sci. Technol. 2020.
   Mnih et al., "Human-level control through deep RL", Nature 2015.
 ================================================================================
 """
@@ -52,37 +52,94 @@ try:
     HAS_RDKIT = True
 except ImportError:
     HAS_RDKIT = False
-    print("[WARN] RDKit non disponible — récompenses chimiques désactivées.")
+    print("[WARN] RDKit non disponible.")
 
 
-# ─── Corpus de départ : médicaments approuvés FDA (SMILES) ───────────────────
+# ─── Extraction SMILES depuis ChEMBL SDF ─────────────────────────────────────
+CHEMBL_SDF_PATH = "/home/crbt/Twin/Dataset/chembl_36.sdf"
+
+def load_chembl_smiles(n: int = 10_000,
+                       sdf_path: str = CHEMBL_SDF_PATH,
+                       max_heavy: int = 40,
+                       min_heavy: int = 8) -> List[str]:
+    """
+    Extrait n SMILES drug-like depuis le SDF ChEMBL.
+    Filtre : 8–40 atomes lourds, QED ≥ 0.3, pas de métaux.
+    Si le SDF n'est pas accessible, retourne SEED_SMILES.
+    """
+    if not os.path.exists(sdf_path):
+        print(f"[Corpus] SDF non trouvé ({sdf_path}) — utilisation seed SMILES.")
+        return SEED_SMILES
+
+    FORBIDDEN_ATOMS = {5, 13, 14, 15, 33, 34, 50, 51, 52, 82, 83}  # B, Al, Si, P, As, Se, Sn, Sb, Te, Pb, Bi
+
+    smiles_list = []
+    print(f"[Corpus] Extraction de {n} SMILES drug-like depuis ChEMBL SDF...")
+    try:
+        supplier = Chem.ForwardSDMolSupplier(sdf_path, removeHs=True, sanitize=True)
+        scanned = 0
+        for mol in supplier:
+            if len(smiles_list) >= n:
+                break
+            scanned += 1
+            if scanned % 100_000 == 0:
+                print(f"  {scanned:,} molécules scannées | {len(smiles_list):,} acceptées")
+            if mol is None:
+                continue
+            n_heavy = mol.GetNumHeavyAtoms()
+            if not (min_heavy <= n_heavy <= max_heavy):
+                continue
+            atom_nums = {a.GetAtomicNum() for a in mol.GetAtoms()}
+            if atom_nums & FORBIDDEN_ATOMS:
+                continue
+            if 6 not in atom_nums:   # must have carbon
+                continue
+            try:
+                qed_val = rdQED.qed(mol)
+                if qed_val < 0.3:
+                    continue
+            except Exception:
+                continue
+            smi = Chem.MolToSmiles(mol)
+            if smi:
+                smiles_list.append(smi)
+    except Exception as e:
+        print(f"[Corpus] Erreur lecture SDF : {e} — utilisation seed SMILES.")
+        return SEED_SMILES
+
+    print(f"[Corpus] {len(smiles_list)} SMILES extraits ({scanned:,} scannés)")
+    if len(smiles_list) < 100:
+        smiles_list = smiles_list + SEED_SMILES
+    return smiles_list
+
+
+# ─── Seed SMILES (fallback si ChEMBL absent) ─────────────────────────────────
 SEED_SMILES = [
-    # Petites molécules approuvées FDA (diversité chimique)
-    "CC(=O)Oc1ccccc1C(=O)O",                     # Aspirine
-    "CC(C)Cc1ccc(cc1)C(C)C(=O)O",                # Ibuprofène
-    "CN1CCC[C@H]1c2cccnc2",                       # Nicotine
-    "c1ccc2c(c1)cc1ccc3cccc4ccc2c1c34",           # Pyrène
-    "Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C",  # Imatinib
-    "CC12CCC3C(C1CCC2O)CCC4=CC(=O)CCC34C",       # Testostérone
-    "CN(C)CCOC(c1ccccc1)c2ccccc2",                # Diphenhydramine
-    "O=C(O)c1ccccc1O",                            # Acide salicylique
-    "Clc1ccc(cc1)C(c2ccccc2)N3CCN(CC3)CCOCCO",   # Hydroxyzine
-    "CC(=O)Nc1ccc(O)cc1",                         # Paracétamol
-    "Oc1ccc(cc1)C2CC(=O)c3c(O)cc(O)cc3O2",       # Naringénine
-    "c1ccc2ncccc2c1",                             # Quinoline
-    "O=C(Nc1ccc(Cl)c(Cl)c1)N2CCC(CC2)N3CCOCC3", # Clozapine analogue
-    "Fc1ccc(cc1)C(=O)CCCN2CCC(CC2)c3noc4cc(F)ccc34", # Haloperidol
-    "CC(=O)[C@@H]1CC[C@H]2[C@@H]3CCC4=CC(=O)CC[C@]4(C)[C@H]3CC[C@@]12C", # Progestérone
-    "CC1=CC2=C(C=C1C)N(C=N2)[C@@H]3[C@@H]([C@@H]([C@H](O3)CO)O)O",       # Riboflavine (partiel)
-    "c1ccc(cc1)CN2CCN(CC2)c3cccc(c3)Cl",         # Clomethiazole analogue
-    "O=C1CCCN1",                                  # Pyrrolidinone
-    "c1ccc(cc1)c2cc(nn2c3ccccc3)C(F)(F)F",       # Célécoxib analogue
-    "CC1(C)OCC(O1)CN2C=NC3=CC=CC=C23",           # Noscapine analogue
-    "CC(C)(C)c1ccc(cc1)C(=O)N[C@@H](Cc2ccccc2)C(=O)N[C@@H](CC(C)C)CC(=O)O",  # Peptidomimétique
-    "O=C(O)c1ccc2c(c1)N=C(c3ccccc23)c4ccccc4",  # Acridine
-    "CCOC(=O)c1cnc(N)c(Cl)c1F",                  # Fluoroquinolone précurseur
-    "CC12CC(=O)C3C(C1CC(O2)(CC3=O)C)C",          # Stéroïde synthétique
-    "c1ccc(cc1)S(=O)(=O)Nc2ccc(cc2)N",           # Sulfanilamide
+    "CC(=O)Oc1ccccc1C(=O)O",
+    "CC(C)Cc1ccc(cc1)C(C)C(=O)O",
+    "CN1CCC[C@H]1c2cccnc2",
+    "Cc1ccc(cc1Nc2nccc(n2)c3cccnc3)NC(=O)c4ccc(cc4)CN5CCN(CC5)C",
+    "CC12CCC3C(C1CCC2O)CCC4=CC(=O)CCC34C",
+    "CN(C)CCOC(c1ccccc1)c2ccccc2",
+    "O=C(O)c1ccccc1O",
+    "Clc1ccc(cc1)C(c2ccccc2)N3CCN(CC3)CCOCCO",
+    "CC(=O)Nc1ccc(O)cc1",
+    "Oc1ccc(cc1)C2CC(=O)c3c(O)cc(O)cc3O2",
+    "c1ccc2ncccc2c1",
+    "O=C(Nc1ccc(Cl)c(Cl)c1)N2CCC(CC2)N3CCOCC3",
+    "Fc1ccc(cc1)C(=O)CCCN2CCC(CC2)c3noc4cc(F)ccc34",
+    "c1ccc(cc1)CN2CCN(CC2)c3cccc(c3)Cl",
+    "O=C1CCCN1",
+    "c1ccc(cc1)c2cc(nn2c3ccccc3)C(F)(F)F",
+    "CCOC(=O)c1cnc(N)c(Cl)c1F",
+    "c1ccc(cc1)S(=O)(=O)Nc2ccc(cc2)N",
+    "Cc1nc2ccccc2c(=O)n1Cc1ccccc1",
+    "O=c1[nH]c2ccccc2n1Cc1ccccc1",
+    "CCc1ccc(NC(=O)c2ccc(N)cc2)cc1",
+    "O=C(O)c1ccc(Cl)cc1",
+    "Cc1ccc(C(=O)O)cc1",
+    "NC(=O)c1ccncc1",
+    "Cc1ccc(-c2ccccc2)cc1",
 ]
 
 
@@ -96,34 +153,36 @@ DQN_HP = dict(
     eps_end            = 0.05,
     eps_decay_steps    = 8_000,
     target_update_freq = 200,
-    max_selfies_len    = 35,
+    max_selfies_len    = 30,
     n_episodes         = 2_000,
     hidden_dim         = 256,
     target_ic50        = -1.5,
-    # Récompenses
+    # ── Récompenses positives
     qed_weight         = 2.0,
     logp_weight        = 0.5,
     lipinski_bonus     = 1.0,
     ic50_weight        = 0.8,
     diversity_weight   = 0.4,
-    arom_bonus         = 0.8,   # bonus par cycle aromatique (force scaffolds benzéniques)
-    carbon_penalty     = -1.5,  # pénalise molécules sans carbones (S+1=S+1=...)
-    cumul_penalty      = -1.0,  # pénalise cumulènes C=C=C=C (non synthétisables)
-    min_carbon_frac    = 0.3,   # au moins 30% des atomes lourds doivent être C
+    arom_bonus         = 0.8,    # bonus cycles aromatiques (max 3 cycles)
+    # ── Pénalités chimiques (v3.1)
+    carbon_penalty     = -1.5,   # molécule sans assez de carbones
+    cumul_penalty      = -1.0,   # cumulènes =C=C=C=
+    min_carbon_frac    = 0.3,
+    # ── Pénalités structurelles (v3.2 — nouvelles)
+    size_penalty_coef  = 0.15,   # -0.15 par atome au-delà de 25
+    max_heavy_atoms    = 25,
+    repeat_penalty_coef= 0.4,    # -0.4 par répétition au-delà de 4
+    max_token_repeat   = 4,
+    stereo_penalty_coef= 0.3,    # -0.3 par centre stéréo au-delà de 6
+    max_stereo_centers = 6,
     log_interval       = 50,
 )
 
 
 # ─── Vocabulaire SELFIES ──────────────────────────────────────────────────────
 class SELFIESVocabulary:
-    """
-    Construit un vocabulaire SELFIES à partir d'un corpus de SMILES.
-    Chaque token SELFIES est un symbole atomique ou de liaison entre crochets.
-    """
-
-    PAD_TOKEN   = "[nop]"   # token de remplissage (no-op en SELFIES)
-    START_TOKEN = "[nop]"   # début d'épisode = no-op
-    END_TOKEN   = "[EOS]"   # token de fin personnalisé
+    PAD_TOKEN = "[nop]"
+    END_TOKEN = "[EOS]"
 
     def __init__(self, smiles_list: List[str]):
         selfies_list = []
@@ -135,32 +194,17 @@ class SELFIESVocabulary:
             except Exception:
                 pass
 
-        # Collecter tous les tokens uniques
+        # Tokens du corpus
         token_set = set()
         for sel in selfies_list:
             for tok in sf.split_selfies(sel):
                 token_set.add(tok)
 
-        # Garder uniquement les tokens drug-like (C, N, O, S, F, Cl, Br, cycles, liaisons)
-        DRUG_LIKE_ATOMS = {
-            "[C]", "[=C]", "[#C]", "[C-1]", "[C@@Hexpl]", "[C@Hexpl]",
-            "[N]", "[=N]", "[#N]", "[N+1]", "[NH1]", "[NH2]",
-            "[O]", "[=O]", "[OH1]",
-            "[S]", "[=S]", "[SH1]",
-            "[F]", "[Cl]", "[Br]", "[I]",
-            "[Ring1]", "[Ring2]", "[Branch1]", "[Branch2]",
-            "[=Branch1]", "[=Branch2]", "[#Branch1]", "[#Branch2]",
-            "[=Ring1]", "[=Ring2]", "[#Ring1]", "[#Ring2]",
-            "[nop]",
-        }
-        # Ajouter les tokens des SMILES du corpus (déjà filtrés)
-        # + tokens drug-like de l'alphabet standard
+        # Compléter avec l'alphabet standard, filtré drug-like
         try:
-            alphabet = list(sf.get_semantic_robust_alphabet())
-            for tok in alphabet:
-                # Inclure seulement C, N, O, S, F, Cl, Br, liaisons structurales
-                if any(atom in tok for atom in ["C", "N", "O", "S", "F", "l", "r", "Ring", "Branch", "nop"]):
-                    if not any(exotic in tok for exotic in ["Si", "Se", "Te", "At", "Xe", "Kr", "Rn", "Sn", "Pb", "As", "Ge", "B]", "[B", "P]", "[P"]):
+            for tok in sf.get_semantic_robust_alphabet():
+                if any(a in tok for a in ["C", "N", "O", "S", "F", "l", "r", "Ring", "Branch", "nop"]):
+                    if not any(x in tok for x in ["Si", "Se", "Te", "Sn", "Pb", "As", "Ge", "[B", "B]", "[P", "P]"]):
                         token_set.add(tok)
         except Exception:
             pass
@@ -168,24 +212,27 @@ class SELFIESVocabulary:
         token_set.discard(self.END_TOKEN)
         token_set.discard(self.PAD_TOKEN)
 
-        # Ordre déterministe
-        sorted_tokens = sorted(token_set)
-        self.idx2tok = [self.PAD_TOKEN, self.END_TOKEN] + sorted_tokens
-        self.tok2idx = {t: i for i, t in enumerate(self.idx2tok)}
-
+        self.idx2tok   = [self.PAD_TOKEN, self.END_TOKEN] + sorted(token_set)
+        self.tok2idx   = {t: i for i, t in enumerate(self.idx2tok)}
         self.PAD_IDX   = 0
         self.END_IDX   = 1
         self.vocab_size = len(self.idx2tok)
 
+        # Index des tokens stéréochimiques (pour pénalité)
+        self.stereo_idxs = {
+            i for i, t in enumerate(self.idx2tok)
+            if any(s in t for s in ["@@", "@H", "@]"])
+        }
+
         print(f"[SELFIES Vocab] {self.vocab_size} tokens | "
-              f"corpus: {len(selfies_list)} molécules valides / {len(smiles_list)} SMILES")
+              f"{len(selfies_list)}/{len(smiles_list)} SMILES convertis | "
+              f"{len(self.stereo_idxs)} tokens stéréo")
 
     def encode(self, selfies_str: str) -> List[int]:
-        tokens = list(sf.split_selfies(selfies_str))
-        return [self.tok2idx.get(t, self.PAD_IDX) for t in tokens] + [self.END_IDX]
+        return [self.tok2idx.get(t, self.PAD_IDX)
+                for t in sf.split_selfies(selfies_str)] + [self.END_IDX]
 
     def decode(self, indices: List[int]) -> str:
-        """Convertit une liste d'indices en SELFIES puis en SMILES."""
         tokens = []
         for idx in indices:
             if idx == self.END_IDX:
@@ -197,15 +244,12 @@ class SELFIESVocabulary:
                 tokens.append(tok)
         if not tokens:
             return ""
-        selfies_str = "".join(tokens)
         try:
-            smiles = sf.decoder(selfies_str)
-            return smiles or ""
+            return sf.decoder("".join(tokens)) or ""
         except Exception:
             return ""
 
     def random_token(self) -> int:
-        """Retourne un token aléatoire hors PAD/END."""
         return random.randint(2, self.vocab_size - 1)
 
 
@@ -214,17 +258,13 @@ Transition = collections.namedtuple(
     "Transition", ["state", "action", "reward", "next_state", "done"]
 )
 
-
 class ReplayBuffer:
     def __init__(self, capacity: int):
         self.buffer: Deque[Transition] = collections.deque(maxlen=capacity)
-
     def push(self, *args):
         self.buffer.append(Transition(*args))
-
-    def sample(self, batch_size: int) -> List[Transition]:
-        return random.sample(self.buffer, batch_size)
-
+    def sample(self, n: int) -> List[Transition]:
+        return random.sample(self.buffer, n)
     def __len__(self):
         return len(self.buffer)
 
@@ -241,117 +281,107 @@ class QNetwork(keras.Model):
             layers.Dense(hidden_dim // 2, activation="relu"),
             layers.Dense(vocab_size),
         ])
-
-    def call(self, state, training=False):
-        return self.net(state, training=training)
+    def call(self, x, training=False):
+        return self.net(x, training=training)
 
 
 # ─── Environnement SELFIES ────────────────────────────────────────────────────
 class SELFIESEnv:
-    """
-    Environnement RL où chaque action ajoute un token SELFIES.
-    Toute séquence SELFIES → molécule valide (propriété de SELFIES).
-    """
-
-    def __init__(
-        self,
-        digital_twin: BiIntDigitalTwin,
-        featurizer: BRICSMolecularFeaturizer,
-        vocab: SELFIESVocabulary,
-        z_omics: tf.Tensor,
-        hp: dict = DQN_HP,
-        past_fps: List = None,
-    ):
-        self.twin     = digital_twin
-        self.feat     = featurizer
+    def __init__(self, twin, feat, vocab: SELFIESVocabulary,
+                 z_omics: tf.Tensor, hp: dict = DQN_HP, past_fps: List = None):
+        self.twin     = twin
+        self.feat     = feat
         self.vocab    = vocab
-        self.z        = z_omics
         self.hp       = hp
         self.past_fps = past_fps or []
         self.max_len  = hp["max_selfies_len"]
-
+        self._z_np    = z_omics.numpy().flatten()
         self.tokens: List[int] = []
         self.step_count = 0
 
-        self._z_np = z_omics.numpy().flatten()
-        self._state_dim = len(self._z_np) + vocab.vocab_size
-
-    def _build_state(self, last_token: int) -> np.ndarray:
-        tok_onehot = np.zeros(self.vocab.vocab_size, dtype=np.float32)
-        tok_onehot[min(last_token, self.vocab.vocab_size - 1)] = 1.0
-        return np.concatenate([self._z_np, tok_onehot], axis=0).astype(np.float32)
+    def _state(self, tok_idx: int) -> np.ndarray:
+        oh = np.zeros(self.vocab.vocab_size, dtype=np.float32)
+        oh[min(tok_idx, self.vocab.vocab_size - 1)] = 1.0
+        return np.concatenate([self._z_np, oh])
 
     def reset(self) -> np.ndarray:
-        self.tokens     = []
-        self.step_count = 0
-        return self._build_state(self.vocab.PAD_IDX)
+        self.tokens, self.step_count = [], 0
+        return self._state(self.vocab.PAD_IDX)
 
     def step(self, action: int) -> Tuple[np.ndarray, float, bool]:
         self.tokens.append(action)
         self.step_count += 1
-
         done = (action == self.vocab.END_IDX) or (self.step_count >= self.max_len)
-
-        reward = 0.0
-        if done:
-            reward = self._compute_reward()
-
-        next_state = self._build_state(action)
-        return next_state, reward, done
+        reward = self._compute_reward() if done else 0.0
+        return self._state(action), reward, done
 
     def _compute_reward(self) -> float:
         smiles = self.vocab.decode(self.tokens)
         if not smiles:
             return -0.5
 
-        mol = None
-        if HAS_RDKIT:
-            try:
-                mol = Chem.MolFromSmiles(smiles)
-            except Exception:
-                pass
+        # ── Pénalité répétition token (v3.2)
+        counts = collections.Counter(self.tokens)
+        max_rep = max(counts.values()) if counts else 0
+        rep_pen = 0.0
+        if max_rep > self.hp["max_token_repeat"]:
+            rep_pen = -(max_rep - self.hp["max_token_repeat"]) * self.hp["repeat_penalty_coef"]
 
+        # ── Pénalité stéréochimie excessive (v3.2)
+        stereo_count = sum(counts[i] for i in self.vocab.stereo_idxs if i in counts)
+        stereo_pen = 0.0
+        if stereo_count > self.hp["max_stereo_centers"]:
+            stereo_pen = -(stereo_count - self.hp["max_stereo_centers"]) * self.hp["stereo_penalty_coef"]
+
+        # Si pénalités structurelles très fortes, retour anticipé
+        if rep_pen + stereo_pen < -1.5:
+            return float(np.clip(rep_pen + stereo_pen, -2.0, 0.0))
+
+        mol = Chem.MolFromSmiles(smiles) if HAS_RDKIT else None
         if mol is None:
-            return -0.5
+            return -0.5 + rep_pen + stereo_pen
 
-        # Filtre : au moins 5 atomes lourds
-        if mol.GetNumHeavyAtoms() < 5:
+        n_heavy = mol.GetNumHeavyAtoms()
+
+        # Filtre taille minimale
+        if n_heavy < 5:
             return -0.2
 
-        # Filtre drug-like : doit contenir des carbones (élimine [S+1]=[S+1]=... etc.)
-        atom_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
-        n_carbon = atom_nums.count(6)
-        n_heavy  = mol.GetNumHeavyAtoms()
-        if n_carbon == 0 or (n_carbon / n_heavy) < self.hp.get("min_carbon_frac", 0.3):
-            return float(self.hp.get("carbon_penalty", -1.5))
+        # ── Pénalité taille excessive (v3.2)
+        size_pen = 0.0
+        if n_heavy > self.hp["max_heavy_atoms"]:
+            size_pen = -(n_heavy - self.hp["max_heavy_atoms"]) * self.hp["size_penalty_coef"]
 
-        # Filtre cumulènes : pénalise C=C=C=C (chimie non synthétisable)
-        smiles_str = Chem.MolToSmiles(mol)
-        cumul_count = smiles_str.count("=C=") + smiles_str.count("=c=")
-        if cumul_count >= 3:
-            return float(self.hp.get("cumul_penalty", -1.0))
+        # Filtre fraction carbone (v3.1)
+        atom_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
+        n_carbon  = atom_nums.count(6)
+        if n_carbon == 0 or (n_carbon / n_heavy) < self.hp["min_carbon_frac"]:
+            return float(self.hp["carbon_penalty"]) + rep_pen + stereo_pen
+
+        # Filtre cumulènes (v3.1)
+        can_smi = Chem.MolToSmiles(mol)
+        if can_smi.count("=C=") + can_smi.count("=c=") >= 3:
+            return float(self.hp["cumul_penalty"]) + rep_pen + stereo_pen
 
         reward = 0.0
 
-        # QED — drug-likeness [0, 1]
+        # QED
         try:
-            qed_val = rdQED.qed(mol)
-            reward += self.hp["qed_weight"] * qed_val
+            reward += self.hp["qed_weight"] * rdQED.qed(mol)
         except Exception:
             pass
 
-        # LogP — fenêtre idéale [1, 3]
+        # LogP gaussien centré sur 2
         try:
             logp = Descriptors.MolLogP(mol)
-            logp_rew = float(np.exp(-((logp - 2.0) ** 2) / 4.0))
-            reward += self.hp["logp_weight"] * logp_rew
+            reward += self.hp["logp_weight"] * float(np.exp(-((logp - 2.0) ** 2) / 4.0))
         except Exception:
             pass
 
-        # Bonus cycles aromatiques (force scaffolds benzéniques, indoliques, etc.)
+        # Bonus cycles aromatiques
         try:
             n_arom = rdMolDescriptors.CalcNumAromaticRings(mol)
-            reward += self.hp.get("arom_bonus", 0.8) * min(n_arom, 3) / 3.0
+            reward += self.hp["arom_bonus"] * min(n_arom, 3) / 3.0
         except Exception:
             pass
 
@@ -366,32 +396,31 @@ class SELFIESEnv:
         except Exception:
             pass
 
-        # IC50 prédit par le Digital Twin
+        # IC50 prédit
         try:
-            atom_feat = self.feat.featurize(smiles)[np.newaxis]
-            adj       = np.ones((1, HP["max_atoms"], HP["max_atoms"]), dtype=np.float32)
-            gex_d     = tf.zeros([1, HP["gex_dim"]])
-            mut_d     = tf.zeros([1, HP["mut_dim"]])
-            cnv_d     = tf.zeros([1, HP["cnv_dim"]])
-            inputs    = (tf.constant(atom_feat), tf.constant(adj), gex_d, mut_d, cnv_d)
-            ic50_pred, _ = self.twin(inputs, training=False)
-            ic50_val  = float(ic50_pred[0].numpy())
-            ic50_rew  = float(np.exp(-((ic50_val - self.hp["target_ic50"]) ** 2) / 2.0))
-            reward   += self.hp["ic50_weight"] * ic50_rew
+            af  = self.feat.featurize(smiles)[np.newaxis]
+            adj = np.ones((1, HP["max_atoms"], HP["max_atoms"]), dtype=np.float32)
+            inp = (tf.constant(af), tf.constant(adj),
+                   tf.zeros([1, HP["gex_dim"]]),
+                   tf.zeros([1, HP["mut_dim"]]),
+                   tf.zeros([1, HP["cnv_dim"]]))
+            ic50_val = float(self.twin(inp, training=False)[0][0].numpy())
+            reward  += self.hp["ic50_weight"] * float(
+                np.exp(-((ic50_val - self.hp["target_ic50"]) ** 2) / 2.0))
         except Exception:
             pass
 
-        # Diversité Tanimoto (encourage l'exploration)
-        if HAS_RDKIT and self.past_fps and self.hp["diversity_weight"] > 0:
+        # Diversité Tanimoto
+        if self.past_fps:
             try:
                 fp  = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
                 sim = DataStructs.BulkTanimotoSimilarity(fp, self.past_fps)
-                max_sim = max(sim) if sim else 0.0
-                reward += (1.0 - max_sim) * self.hp["diversity_weight"]
+                reward += (1.0 - max(sim)) * self.hp["diversity_weight"]
             except Exception:
                 pass
 
-        return float(np.clip(reward, -1.0, 10.0))
+        total = reward + rep_pen + stereo_pen + size_pen
+        return float(np.clip(total, -2.0, 10.0))
 
     @property
     def current_smiles(self) -> str:
@@ -400,239 +429,189 @@ class SELFIESEnv:
 
 # ─── Agent DQN ────────────────────────────────────────────────────────────────
 class DQNDrugOptimizer:
-    def __init__(
-        self,
-        digital_twin: BiIntDigitalTwin,
-        featurizer: BRICSMolecularFeaturizer,
-        vocab: SELFIESVocabulary,
-        hp: dict = DQN_HP,
-    ):
-        self.twin  = digital_twin
-        self.feat  = featurizer
-        self.vocab = vocab
-        self.hp    = hp
+    def __init__(self, twin, feat, vocab: SELFIESVocabulary, hp: dict = DQN_HP):
+        self.twin, self.feat, self.vocab, self.hp = twin, feat, vocab, hp
 
-        latent_dim = HP["latent_dim"]
+        state_dim  = HP["latent_dim"] + vocab.vocab_size
         vocab_size = vocab.vocab_size
-        state_dim  = latent_dim + vocab_size
 
         self.q_online = QNetwork(state_dim, vocab_size, hp["hidden_dim"], name="q_online")
         self.q_target = QNetwork(state_dim, vocab_size, hp["hidden_dim"], name="q_target")
         self._sync_target()
 
-        self.optimizer = keras.optimizers.Adam(hp["lr"])
-        self.replay    = ReplayBuffer(hp["replay_buffer_size"])
-        self.loss_fn   = keras.losses.Huber()
-
+        self.optimizer   = keras.optimizers.Adam(hp["lr"])
+        self.replay      = ReplayBuffer(hp["replay_buffer_size"])
+        self.loss_fn     = keras.losses.Huber()
         self.global_step = 0
         self.best_smiles = ""
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN-SELFIES] Initialisé | state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"[DQN-SELFIES v3.2] state_dim={state_dim} | vocab_size={vocab_size}")
 
     def _sync_target(self):
         self.q_target.set_weights(self.q_online.get_weights())
 
     def _epsilon(self) -> float:
-        t     = min(self.global_step, self.hp["eps_decay_steps"])
-        ratio = t / self.hp["eps_decay_steps"]
-        return self.hp["eps_start"] + ratio * (self.hp["eps_end"] - self.hp["eps_start"])
+        t = min(self.global_step, self.hp["eps_decay_steps"])
+        return self.hp["eps_start"] + t / self.hp["eps_decay_steps"] * (
+            self.hp["eps_end"] - self.hp["eps_start"])
 
     def select_action(self, state: np.ndarray) -> int:
         if random.random() < self._epsilon():
-            # Exploration : token aléatoire (PAD et END exclus au début)
             return self.vocab.random_token()
-        state_t  = tf.expand_dims(tf.constant(state, dtype=tf.float32), 0)
-        q_values = self.q_online(state_t, training=False).numpy()[0]
-        # Décourager PAD (index 0) mais autoriser END
-        q_values[self.vocab.PAD_IDX] = -np.inf
-        return int(np.argmax(q_values))
+        q = self.q_online(
+            tf.expand_dims(tf.constant(state, dtype=tf.float32), 0),
+            training=False).numpy()[0]
+        q[self.vocab.PAD_IDX] = -np.inf
+        return int(np.argmax(q))
 
     @tf.function
     def _update_step(self, states, actions, rewards, next_states, dones):
         with tf.GradientTape() as tape:
-            q_all = self.q_online(states, training=True)
-            idx   = tf.stack([tf.range(tf.shape(actions)[0]), actions], axis=1)
-            q_sa  = tf.gather_nd(q_all, idx)
-
-            q_next_online = self.q_online(next_states, training=False)
-            best_actions  = tf.argmax(q_next_online, axis=1, output_type=tf.int32)
-            q_next_target = self.q_target(next_states, training=False)
-            idx_next      = tf.stack([tf.range(tf.shape(best_actions)[0]), best_actions], axis=1)
-            q_next_best   = tf.gather_nd(q_next_target, idx_next)
-
-            target = rewards + self.hp["gamma"] * q_next_best * (1.0 - dones)
+            idx    = tf.stack([tf.range(tf.shape(actions)[0]), actions], axis=1)
+            q_sa   = tf.gather_nd(self.q_online(states, training=True), idx)
+            ba     = tf.argmax(self.q_online(next_states, training=False),
+                               axis=1, output_type=tf.int32)
+            idx_n  = tf.stack([tf.range(tf.shape(ba)[0]), ba], axis=1)
+            q_next = tf.gather_nd(self.q_target(next_states, training=False), idx_n)
+            target = rewards + self.hp["gamma"] * q_next * (1.0 - dones)
             loss   = self.loss_fn(tf.stop_gradient(target), q_sa)
-
-        grads = tape.gradient(loss, self.q_online.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.q_online.trainable_variables))
+        self.optimizer.apply_gradients(
+            zip(tape.gradient(loss, self.q_online.trainable_variables),
+                self.q_online.trainable_variables))
         return loss
 
     def _learn(self):
         if len(self.replay) < self.hp["batch_size"]:
             return None
-        batch       = self.replay.sample(self.hp["batch_size"])
-        states      = tf.constant(np.stack([t.state      for t in batch]), dtype=tf.float32)
-        actions     = tf.constant(np.array( [t.action     for t in batch]), dtype=tf.int32)
-        rewards     = tf.constant(np.array( [t.reward     for t in batch]), dtype=tf.float32)
-        next_states = tf.constant(np.stack([t.next_state for t in batch]), dtype=tf.float32)
-        dones       = tf.constant(np.array( [t.done       for t in batch], dtype=np.float32))
-        return self._update_step(states, actions, rewards, next_states, dones)
-
-    def _get_z(self, gex, mut, cnv) -> tf.Tensor:
-        z, _, _ = self.twin.omics_vae((gex, mut, cnv), training=False)
-        return z
+        b = self.replay.sample(self.hp["batch_size"])
+        return self._update_step(
+            tf.constant(np.stack([t.state      for t in b]), dtype=tf.float32),
+            tf.constant(np.array( [t.action     for t in b]), dtype=tf.int32),
+            tf.constant(np.array( [t.reward     for t in b]), dtype=tf.float32),
+            tf.constant(np.stack([t.next_state for t in b]), dtype=tf.float32),
+            tf.constant(np.array( [t.done       for t in b], dtype=np.float32)),
+        )
 
     def optimize(self, gex, mut, cnv, n_episodes: int = None) -> dict:
         n_episodes = n_episodes or self.hp["n_episodes"]
-        z = self._get_z(gex, mut, cnv)
+        z, _, _    = self.twin.omics_vae((gex, mut, cnv), training=False)
 
-        rewards_history  = []
-        losses_history   = []
-        valid_count      = 0
-        top_molecules    = []   # (reward, smiles)
+        rewards_hist, valid_count, top_mols = [], 0, []
 
-        print(f"\n[DQN-SELFIES] Démarrage — {n_episodes} épisodes")
-        print(f"  ε: {self.hp['eps_start']:.2f} → {self.hp['eps_end']:.2f} "
-              f"sur {self.hp['eps_decay_steps']} steps")
-        print(f"  Récompenses : QED×{self.hp['qed_weight']} | "
-              f"LogP×{self.hp['logp_weight']} | "
-              f"Lipinski+{self.hp['lipinski_bonus']} | "
-              f"IC50×{self.hp['ic50_weight']} | "
-              f"Diversité×{self.hp['diversity_weight']}\n")
+        print(f"\n[DQN v3.2] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
+        print(f"  ε: {self.hp['eps_start']} → {self.hp['eps_end']} / {self.hp['eps_decay_steps']} steps")
+        print(f"  Pénalités : taille(>{self.hp['max_heavy_atoms']} atomes) | "
+              f"répétition(>{self.hp['max_token_repeat']}×) | "
+              f"stéréo(>{self.hp['max_stereo_centers']} centres)\n")
 
         for ep in range(1, n_episodes + 1):
             env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
                                hp=self.hp, past_fps=self.past_fps)
             state = env.reset()
-            ep_reward = 0.0
-            ep_loss   = []
+            ep_r, ep_loss = 0.0, []
 
             while True:
-                action                   = self.select_action(state)
-                next_state, reward, done = env.step(action)
+                action              = self.select_action(state)
+                state, reward, done = env.step(action)
                 self.replay.push(state, action, np.float32(reward),
-                                 next_state, np.float32(done))
-                state     = next_state
-                ep_reward = reward if done else ep_reward
+                                 state, np.float32(done))
+                ep_r = reward if done else ep_r
                 self.global_step += 1
-
                 loss = self._learn()
                 if loss is not None:
                     ep_loss.append(float(loss.numpy()))
-
                 if self.global_step % self.hp["target_update_freq"] == 0:
                     self._sync_target()
-
                 if done:
                     break
 
-            smiles = env.current_smiles
-            rewards_history.append(ep_reward)
+            smi = env.current_smiles
+            rewards_hist.append(ep_r)
 
-            # Une molécule est valide si RDKit la parse (reward > -0.4)
-            if ep_reward > -0.4 and smiles:
+            if ep_r > -0.4 and smi:
                 valid_count += 1
-                top_molecules.append((ep_reward, smiles))
-                top_molecules.sort(key=lambda x: -x[0])
-                top_molecules = top_molecules[:10]  # garder les 10 meilleures
+                top_mols.append((ep_r, smi))
+                top_mols.sort(key=lambda x: -x[0])
+                top_mols = top_mols[:10]
 
-            if ep_reward > self.best_reward and smiles:
-                self.best_reward = ep_reward
-                self.best_smiles = smiles
-                if HAS_RDKIT:
-                    try:
-                        mol = Chem.MolFromSmiles(smiles)
-                        if mol:
-                            fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
-                            self.past_fps.append(fp)
-                    except Exception:
-                        pass
+            if ep_r > self.best_reward and smi:
+                self.best_reward, self.best_smiles = ep_r, smi
+                try:
+                    mol = Chem.MolFromSmiles(smi)
+                    if mol:
+                        self.past_fps.append(
+                            AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024))
+                except Exception:
+                    pass
 
             if ep % self.hp["log_interval"] == 0 or ep == 1:
-                mean_r    = float(np.mean(rewards_history[-50:]))
-                mean_l    = float(np.mean(ep_loss)) if ep_loss else float("nan")
-                valid_pct = 100.0 * valid_count / ep
-                best_disp = (self.best_smiles[:35] if self.best_smiles else "<aucun>")
-                print(
-                    f"  Ep {ep:5d}/{n_episodes} | "
-                    f"ε={self._epsilon():.3f} | "
-                    f"R={ep_reward:+.3f} | "
-                    f"Moy(50)={mean_r:+.3f} | "
-                    f"Valid={valid_pct:.1f}% | "
-                    f"Loss={mean_l:.4f} | "
-                    f"Best: {best_disp!s:35s} ({self.best_reward:.3f})"
-                )
+                mean_r = float(np.mean(rewards_hist[-50:]))
+                mean_l = float(np.mean(ep_loss)) if ep_loss else float("nan")
+                print(f"  Ep {ep:5d}/{n_episodes} | ε={self._epsilon():.3f} | "
+                      f"R={ep_r:+.3f} | Moy50={mean_r:+.3f} | "
+                      f"Valid={100*valid_count/ep:.1f}% | Loss={mean_l:.4f} | "
+                      f"Best: {self.best_smiles[:40]!s:40s} ({self.best_reward:.3f})")
 
-        print(f"\n[DQN-SELFIES] Optimisation terminée.")
+        print(f"\n[DQN v3.2] Terminé.")
         print(f"  Meilleur SMILES  : {self.best_smiles}")
         print(f"  Meilleure reward : {self.best_reward:.4f}")
-        print(f"  Molécules valides: {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
-
-        if top_molecules:
-            print(f"\n  Top 5 molécules générées :")
-            for rank, (r, s) in enumerate(top_molecules[:5], 1):
-                print(f"    {rank}. reward={r:.3f}  {s}")
-
-        return {
-            "best_smiles"       : self.best_smiles,
-            "best_reward"       : self.best_reward,
-            "reward_trajectory" : rewards_history,
-            "loss_trajectory"   : losses_history,
-            "valid_count"       : valid_count,
-            "top_molecules"     : top_molecules,
-        }
+        print(f"  Valides          : {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
+        if top_mols:
+            print(f"\n  Top 5 :")
+            for i, (r, s) in enumerate(top_mols[:5], 1):
+                print(f"    {i}. R={r:.3f}  {s}")
+        return dict(best_smiles=self.best_smiles, best_reward=self.best_reward,
+                    reward_trajectory=rewards_hist, valid_count=valid_count,
+                    top_molecules=top_mols)
 
     def save_weights(self, path: str = "dqn_weights"):
         os.makedirs(path, exist_ok=True)
         self.q_online.save_weights(os.path.join(path, "q_online.weights.h5"))
         self.q_target.save_weights(os.path.join(path, "q_target.weights.h5"))
-        print(f"[DQN] Poids sauvegardés dans {path}/")
+        print(f"[DQN] Poids → {path}/")
 
     def load_weights(self, path: str = "dqn_weights"):
         self.q_online.load_weights(os.path.join(path, "q_online.weights.h5"))
         self._sync_target()
-        print(f"[DQN] Poids chargés depuis {path}/")
 
 
 # ─── Point d'entrée ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print("  DQN Drug Optimizer v3 — SELFIES — Bi-Int Digital Twin")
+    print("  DQN Drug Optimizer v3.2 — SELFIES + ChEMBL 10k corpus")
     print("=" * 70)
 
-    if not HAS_SELFIES:
-        print("[ERREUR] pip install selfies")
-        sys.exit(1)
+    # 1. Charger corpus ChEMBL
+    corpus = load_chembl_smiles(n=10_000)
 
-    print(f"\n[selfies] version {sf.__version__}")
+    # 2. Construire vocabulaire
+    vocab = SELFIESVocabulary(corpus)
 
-    print("\n[Loading] BiIntDigitalTwin + vocabulaire SELFIES...")
+    # Test round-trip
+    test_sel = sf.encoder("CC(=O)Nc1ccc(O)cc1")   # paracétamol
+    print(f"[Vocab test] Paracétamol → {vocab.decode(vocab.encode(test_sel))}")
+
+    # 3. Charger modèle
     dt_model   = BiIntDigitalTwin(HP)
     featurizer = BRICSMolecularFeaturizer()
-    vocab      = SELFIESVocabulary(SEED_SMILES)
 
-    # Test de décodage vocabulaire
-    test_sel = sf.encoder("CC(=O)Oc1ccccc1C(=O)O")
-    test_idx = vocab.encode(test_sel)
-    test_smi = vocab.decode(test_idx)
-    print(f"[Vocab test] Aspirine → SELFIES → SMILES : {test_smi}")
-
-    # Données omiques synthétiques (remplacer par données réelles via fullPipeline)
+    # 4. Données omiques (synthétiques — remplacer par profil réel via fullPipeline)
     gex = tf.random.normal([1, HP["gex_dim"]])
     mut = tf.cast(tf.random.uniform([1, HP["mut_dim"]], 0, 2, dtype=tf.int32), tf.float32)
     cnv = tf.random.normal([1, HP["cnv_dim"]])
 
+    # 5. Optimisation
     agent  = DQNDrugOptimizer(dt_model, featurizer, vocab, DQN_HP)
-    result = agent.optimize(gex, mut, cnv, n_episodes=DQN_HP["n_episodes"])
+    result = agent.optimize(gex, mut, cnv)
 
     print(f"\n{'='*70}")
     print(f"  RÉSULTAT FINAL")
     print(f"{'='*70}")
-    print(f"  Meilleur SMILES  : {result['best_smiles']}")
-    print(f"  Récompense       : {result['best_reward']:.4f}")
-    print(f"  Molécules valides: {result['valid_count']}/{DQN_HP['n_episodes']} "
+    print(f"  Meilleur SMILES : {result['best_smiles']}")
+    print(f"  Récompense      : {result['best_reward']:.4f}")
+    print(f"  Valides         : {result['valid_count']}/{DQN_HP['n_episodes']} "
           f"({100*result['valid_count']/DQN_HP['n_episodes']:.1f}%)")
 
     agent.save_weights("dqn_weights_v3")
