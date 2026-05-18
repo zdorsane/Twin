@@ -44,14 +44,15 @@ NOTES = {
 }
 
 
-def load_data(batch_size: int, max_samples: int = 0):
+def load_data(batch_size: int, max_samples: int = 0, split_mode: str = 'random'):
     """Return (train_ds, val_ds, data_source) trying CCLE first.
     max_samples > 0 : truncate the dataset for fast runs (--fast flag).
+    split_mode     : 'random' | 'leave_drug_out' | 'leave_cell_out'
     """
     if os.path.isdir(CCLE_DIR):
         try:
             train_ds, val_ds, n_real = load_ccle_real_data(
-                ccle_dir=CCLE_DIR, batch_size=batch_size
+                ccle_dir=CCLE_DIR, batch_size=batch_size, split_mode=split_mode
             )
             if max_samples > 0:
                 n_batches = max(1, max_samples // batch_size)
@@ -77,14 +78,16 @@ def load_data(batch_size: int, max_samples: int = 0):
 
 
 def run_comparison(epochs: int = 10, use_pretrained: bool = True,
-                   batch_size: int = None, max_samples: int = 0):
+                   batch_size: int = None, max_samples: int = 0,
+                   split_mode: str = 'random'):
     """Train each loss mode and collect final metrics."""
 
     tf.random.set_seed(42)
     np.random.seed(42)
 
     bs = batch_size or HP["batch_size"]
-    train_ds, val_ds, data_source = load_data(bs, max_samples=max_samples)
+    train_ds, val_ds, data_source = load_data(bs, max_samples=max_samples,
+                                              split_mode=split_mode)
 
     rows = []
 
@@ -119,6 +122,7 @@ def run_comparison(epochs: int = 10, use_pretrained: bool = True,
             "final_loss":  round(final_loss,      4),
             "epochs":      epochs,
             "data_source": data_source,
+            "split_mode":  split_mode,
         })
 
         print(
@@ -169,7 +173,7 @@ def save_csv(rows, path: str):
     """Write results DataFrame to CSV, creating parent dir if needed."""
     os.makedirs(os.path.dirname(path), exist_ok=True)
     df = pd.DataFrame(rows, columns=[
-        "loss_mode", "val_rmse", "pearson_r", "final_loss", "epochs", "data_source"
+        "loss_mode", "val_rmse", "pearson_r", "final_loss", "epochs", "data_source", "split_mode"
     ])
     df.to_csv(path, index=False)
     print(f"\n[Saved] Results written to {path}")
@@ -195,11 +199,18 @@ def main():
         "--fast", action="store_true",
         help="Use only 20k train samples per mode (~3-4 min total instead of 45-60 min)."
     )
+    parser.add_argument(
+        "--split-mode", default="random",
+        choices=["random", "leave_drug_out", "leave_cell_out"],
+        help="Train/val split strategy (default: random). "
+             "leave_drug_out = no drug shared between train and val (true generalization test)."
+    )
     args = parser.parse_args()
 
     use_pretrained = not args.no_pretrain
     max_samples    = 20_000 if args.fast else 0
     bs             = args.batch_size
+    split_mode     = args.split_mode
 
     print("=" * 55)
     print("  VAE Loss Mode Comparison — CCLE QSAR IC50 Task")
@@ -208,10 +219,12 @@ def main():
         print("  Mode: --fast (20k samples, indicative results only)")
     if bs:
         print(f"  Batch size: {bs}")
+    print(f"  Split: {split_mode}")
     print("=" * 55)
 
     rows = run_comparison(epochs=args.epochs, use_pretrained=use_pretrained,
-                          batch_size=bs, max_samples=max_samples)
+                          batch_size=bs, max_samples=max_samples,
+                          split_mode=split_mode)
 
     print_table(rows)
     declare_winners(rows)
