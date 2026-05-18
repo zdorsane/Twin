@@ -1226,7 +1226,8 @@ def load_ccle_real_data(
     mut_mat_full = np.zeros((len(common_cells), mut_dim), dtype=np.float32)
     if os.path.exists(mut_path):
         try:
-            mut_df = pd.read_csv(mut_path, sep='\t', low_memory=False)
+            mut_df = pd.read_csv(mut_path, sep='\t', low_memory=False,
+                                  comment='#', on_bad_lines='skip')
             if 'Hugo_Symbol' in mut_df.columns and 'Tumor_Sample_Barcode' in mut_df.columns:
                 mut_df['cell'] = mut_df['Tumor_Sample_Barcode'].str.split('_').str[0]
                 mut_df = mut_df[mut_df['cell'].isin(common_cells)]

@@ -44,14 +44,23 @@ NOTES = {
 }
 
 
-def load_data(batch_size: int):
-    """Return (train_ds, val_ds, data_source) trying CCLE first."""
+def load_data(batch_size: int, max_samples: int = 0):
+    """Return (train_ds, val_ds, data_source) trying CCLE first.
+    max_samples > 0 : truncate the dataset for fast runs (--fast flag).
+    """
     if os.path.isdir(CCLE_DIR):
         try:
             train_ds, val_ds, n_real = load_ccle_real_data(
                 ccle_dir=CCLE_DIR, batch_size=batch_size
             )
-            print(f"[Data] Loaded real CCLE data ({n_real} samples).")
+            if max_samples > 0:
+                n_batches = max(1, max_samples // batch_size)
+                train_ds = train_ds.take(n_batches)
+                val_ds   = val_ds.take(max(1, n_batches // 4))
+                print(f"[Data] --fast: using {n_batches * batch_size} train / "
+                      f"{max(1, n_batches // 4) * batch_size} val samples.")
+            else:
+                print(f"[Data] Loaded real CCLE data ({n_real} samples).")
             return train_ds, val_ds, "real"
         except Exception as exc:
             print(f"[Data] CCLE load failed ({exc}) — falling back to synthetic data.")
@@ -67,13 +76,15 @@ def load_data(batch_size: int):
     return train_ds, val_ds, "synthetic"
 
 
-def run_comparison(epochs: int = 10, use_pretrained: bool = True):
+def run_comparison(epochs: int = 10, use_pretrained: bool = True,
+                   batch_size: int = None, max_samples: int = 0):
     """Train each loss mode and collect final metrics."""
 
     tf.random.set_seed(42)
     np.random.seed(42)
 
-    train_ds, val_ds, data_source = load_data(HP["batch_size"])
+    bs = batch_size or HP["batch_size"]
+    train_ds, val_ds, data_source = load_data(bs, max_samples=max_samples)
 
     rows = []
 
@@ -176,16 +187,31 @@ def main():
         "--no-pretrain", action="store_true",
         help="Skip loading pre-trained drug encoder weights."
     )
+    parser.add_argument(
+        "--batch-size", type=int, default=None,
+        help="Batch size (default: HP['batch_size']=32). Use 256 for faster runs."
+    )
+    parser.add_argument(
+        "--fast", action="store_true",
+        help="Use only 20k train samples per mode (~3-4 min total instead of 45-60 min)."
+    )
     args = parser.parse_args()
 
     use_pretrained = not args.no_pretrain
+    max_samples    = 20_000 if args.fast else 0
+    bs             = args.batch_size
 
     print("=" * 55)
     print("  VAE Loss Mode Comparison — CCLE QSAR IC50 Task")
     print(f"  Epochs: {args.epochs}  |  Pretrained: {use_pretrained}")
+    if args.fast:
+        print("  Mode: --fast (20k samples, indicative results only)")
+    if bs:
+        print(f"  Batch size: {bs}")
     print("=" * 55)
 
-    rows = run_comparison(epochs=args.epochs, use_pretrained=use_pretrained)
+    rows = run_comparison(epochs=args.epochs, use_pretrained=use_pretrained,
+                          batch_size=bs, max_samples=max_samples)
 
     print_table(rows)
     declare_winners(rows)
