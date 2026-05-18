@@ -95,8 +95,12 @@ HP = dict(
 
     # VAE
     latent_dim      = 128,
-    vae_beta        = 2.0,
+    vae_beta        = 2.0,      # used only in loss_mode='kl' — cross_entropy ignores this
     vae_free_bits   = 0.5,
+    # β-annealing (loss_mode='kl' with --beta-anneal):
+    # β starts at vae_beta_start and increases linearly to vae_beta over vae_anneal_epochs
+    vae_beta_start  = 0.0,
+    vae_anneal_epochs = 10,
 
     # GNN
     gnn_layers      = 3,
@@ -623,27 +627,42 @@ class BiIntDigitalTwin(Model):
 # ─── 7. TRAINING LOOP WITH COMBINED LOSSES ───────────────────────────────────
 
 class BiIntTrainer:
-    def __init__(self, model: BiIntDigitalTwin, hp=HP, loss_mode: str = 'kl'):
+    def __init__(self, model: BiIntDigitalTwin, hp=HP, loss_mode: str = 'kl',
+                 beta_anneal: bool = False):
         """
-        loss_mode : 'kl'            — original KL divergence loss (default)
-                    'cross_entropy' — binary CE reconstruction, no KL
-                    'both'          — KL + binary CE
-        Passing loss_mode='kl' (or omitting it) preserves the original behaviour exactly.
+        loss_mode   : 'kl' (default) | 'cross_entropy' | 'both'
+        beta_anneal : if True and loss_mode contains KL, linearly ramp β from
+                      hp['vae_beta_start'] to hp['vae_beta'] over
+                      hp['vae_anneal_epochs'] epochs.
+                      Prevents early KL collapse: model learns reconstruction
+                      before regularization is applied.
         """
-        self.model     = model
-        self.hp        = hp
-        self.loss_mode = loss_mode
-        self.opt       = keras.optimizers.AdamW(hp['learning_rate'])
-        self.mse       = keras.losses.MeanSquaredError()
+        self.model       = model
+        self.hp          = hp
+        self.loss_mode   = loss_mode
+        self.beta_anneal = beta_anneal
+        self.current_beta = hp.get('vae_beta_start', 0.0) if beta_anneal else hp['vae_beta']
+        self.opt         = keras.optimizers.AdamW(hp['learning_rate'])
+        self.mse         = keras.losses.MeanSquaredError()
 
-    def train_step(self, batch):
+    def _beta(self, epoch: int) -> float:
+        """Compute annealed β for the current epoch (1-indexed)."""
+        if not self.beta_anneal or self.loss_mode == 'cross_entropy':
+            return self.hp['vae_beta']
+        anneal_epochs = max(1, self.hp.get('vae_anneal_epochs', 10))
+        beta_start    = self.hp.get('vae_beta_start', 0.0)
+        beta_end      = self.hp['vae_beta']
+        t = min(epoch / anneal_epochs, 1.0)
+        return beta_start + t * (beta_end - beta_start)
+
+    def train_step(self, batch, beta: float = None):
         drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
+        beta = beta if beta is not None else self.hp['vae_beta']
         with tf.GradientTape() as tape:
             ic50_pred, vae_loss = self.model(
                 (drug_atoms, adj_mask, gex, mut, cnv),
                 training=True, loss_mode=self.loss_mode)
             regression_loss = self.mse(ic50_true, ic50_pred)
-            beta = self.hp['vae_beta']
             total_loss = regression_loss + beta * vae_loss
         grads = tape.gradient(total_loss, self.model.trainable_variables)
         self.opt.apply_gradients(zip(grads, self.model.trainable_variables))
@@ -651,47 +670,46 @@ class BiIntTrainer:
         return {'total_loss': total_loss, 'regression_loss': regression_loss,
                 'kl_loss': vae_loss, 'rmse': rmse}
 
-    def val_step(self, batch):
+    def val_step(self, batch, beta: float = None):
         drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
+        beta = beta if beta is not None else self.hp['vae_beta']
         ic50_pred, vae_loss = self.model(
             (drug_atoms, adj_mask, gex, mut, cnv),
             training=False, loss_mode=self.loss_mode)
         regression_loss = self.mse(ic50_true, ic50_pred)
         rmse = tf.sqrt(regression_loss)
-        return {'val_loss': regression_loss + self.hp['vae_beta'] * vae_loss,
+        return {'val_loss': regression_loss + beta * vae_loss,
                 'val_rmse': rmse}
 
     def fit(self, train_ds, val_ds, epochs=50):
         from scipy.stats import pearsonr as _pearsonr
-        history = {'train': [], 'val': [], 'pearson_r': []}
+        history = {'train': [], 'val': [], 'pearson_r': [], 'beta': []}
         for epoch in range(1, epochs + 1):
+            beta = self._beta(epoch)
             train_metrics = {}
             for batch in train_ds:
-                metrics = self.train_step(batch)
+                metrics = self.train_step(batch, beta=beta)
                 for k, v in metrics.items():
                     train_metrics.setdefault(k, []).append(v.numpy())
 
-            val_metrics = {}
             y_true_all, y_pred_all = [], []
+            val_rmse_list = []
             for batch in val_ds:
                 drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
                 ic50_pred, vae_loss = self.model(
                     (drug_atoms, adj_mask, gex, mut, cnv),
                     training=False, loss_mode=self.loss_mode)
                 regression_loss = self.mse(ic50_true, ic50_pred)
-                rmse = tf.sqrt(regression_loss)
-                val_metrics.setdefault('val_loss', []).append(
-                    (regression_loss + self.hp['vae_beta'] * vae_loss).numpy())
-                val_metrics.setdefault('val_rmse', []).append(rmse.numpy())
+                val_rmse_list.append(tf.sqrt(regression_loss).numpy())
                 y_true_all.extend(ic50_true.numpy().tolist())
                 y_pred_all.extend(ic50_pred.numpy().ravel().tolist())
 
             t_rmse = np.mean(train_metrics['rmse'])
-            v_rmse = np.mean(val_metrics['val_rmse'])
+            v_rmse = np.mean(val_rmse_list)
             history['train'].append(t_rmse)
             history['val'].append(v_rmse)
+            history['beta'].append(beta)
 
-            # Pearson r over the full validation set
             pr = 0.0
             if len(y_true_all) > 1:
                 pr, _ = _pearsonr(y_true_all, y_pred_all)
@@ -699,9 +717,10 @@ class BiIntTrainer:
 
             if epoch % 5 == 0 or epoch == 1:
                 loss_label = self.loss_mode.upper()
+                beta_str = f" β={beta:.3f}" if self.beta_anneal else ""
                 print(f"Epoch {epoch:3d} | Train RMSE: {t_rmse:.4f} | "
                       f"Val RMSE: {v_rmse:.4f} | Pearson r: {pr:.4f} | "
-                      f"{loss_label}: {np.mean(train_metrics['kl_loss']):.4f}")
+                      f"{loss_label}: {np.mean(train_metrics['kl_loss']):.4f}{beta_str}")
         return history
 
 
@@ -1638,7 +1657,7 @@ def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_d
 
 
 def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
-                 loss_mode='kl'):
+                 loss_mode='kl', beta_anneal=False):
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
@@ -1676,7 +1695,7 @@ def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
         print(f"\n[Data] Données CCLE réelles chargées ({n_real:,} triplets).")
 
     print("\n[Training] Bi-Int Digital Twin on IC50 prediction (QSAR)...")
-    trainer = BiIntTrainer(model, HP, loss_mode=loss_mode)
+    trainer = BiIntTrainer(model, HP, loss_mode=loss_mode, beta_anneal=beta_anneal)
     history = trainer.fit(train_ds, val_ds, epochs=epochs)
 
     final_stats = None
@@ -1781,15 +1800,18 @@ if __name__ == "__main__":
     parser.add_argument('--rl-episodes', type=int, default=HP['rl_episodes'], help='Number of PPO episodes for RL drug generation')
     parser.add_argument('--no-ppo', action='store_true', help='Skip PPO/RL drug generation, only train IC50 model')
     parser.add_argument('--loss-mode', choices=['kl', 'cross_entropy', 'both'],
-                        default='kl',
-                        help='VAE loss mode: kl (original) | cross_entropy | both (KL+CE)')
+                        default='cross_entropy',
+                        help='VAE loss mode (default: cross_entropy — best on CCLE benchmark)')
+    parser.add_argument('--beta-anneal', action='store_true',
+                        help='Linearly ramp β from 0 to vae_beta over vae_anneal_epochs (KL modes only)')
     args = parser.parse_args()
 
     if args.mode == 'baseline':
         run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False,
-                     loss_mode=args.loss_mode)
+                     loss_mode=args.loss_mode, beta_anneal=args.beta_anneal)
     elif args.mode == 'compare':
         compare_pretraining(epochs=args.epochs)
     else:
         run_pipeline(use_pretrained=True, epochs=args.epochs, rl_episodes=args.rl_episodes,
-                     run_ppo=not args.no_ppo, loss_mode=args.loss_mode)
+                     run_ppo=not args.no_ppo, loss_mode=args.loss_mode,
+                     beta_anneal=args.beta_anneal)
