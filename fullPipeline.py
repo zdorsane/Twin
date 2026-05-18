@@ -1264,15 +1264,38 @@ def load_ccle_real_data(
 
     # ── Featuriser les SMILES des drogues via BRICSMolecularFeaturizer
     featurizer = BRICSMolecularFeaturizer()
-    # Noms de drogues dans ENTITY_STABLE_ID → pas de SMILES directs dans ce dataset
-    # On utilise les noms comme clé et on génère des features dummy si pas de SMILES
-    # (les vraies IC50 sont réelles même si les features drogues sont approchées)
+
+    # Charger le CSV de SMILES réels si disponible (produit par fetch_drug_smiles.py)
+    smiles_csv = os.path.join(ccle_dir, '..', 'ccle_drug_smiles.csv')
+    smiles_map = {}
+    if os.path.exists(smiles_csv):
+        smiles_df = pd.read_csv(smiles_csv)
+        smiles_df = smiles_df.dropna(subset=['smiles'])
+        smiles_map = dict(zip(smiles_df['drug_name'], smiles_df['smiles']))
+        n_mapped = sum(1 for d in drug_ids if d in smiles_map)
+        print(f"  SMILES réels chargés : {n_mapped}/{len(drug_ids)} drogues mappées")
+    else:
+        print(f"  [WARN] {smiles_csv} absent — features drogues aléatoires (random vectors).")
+        print(f"         Lancez fetch_drug_smiles.py pour obtenir de vraies features chimiques.")
+
     drug_atom_feats = {}
     drug_adj_feats  = {}
+    rng_drug = np.random.default_rng(random_seed)
     for drug_id in drug_ids:
-        # Tenter de retrouver un SMILES approximatif via le nom
-        drug_atom_feats[drug_id] = np.random.randn(max_atoms, atom_feat_dim).astype(np.float32) * 0.1
-        drug_adj_feats[drug_id]  = (np.random.rand(max_atoms, max_atoms) > 0.8).astype(np.float32)
+        smiles = smiles_map.get(drug_id)
+        if smiles and HAS_RDKIT:
+            try:
+                atoms, adj = featurizer.featurize(smiles)
+                drug_atom_feats[drug_id] = atoms.astype(np.float32)
+                drug_adj_feats[drug_id]  = adj.astype(np.float32)
+                continue
+            except Exception:
+                pass
+        # Fallback : vecteur aléatoire déterministe par drogue (seed fixe par index)
+        drug_atom_feats[drug_id] = rng_drug.standard_normal(
+            (max_atoms, atom_feat_dim)).astype(np.float32) * 0.1
+        drug_adj_feats[drug_id]  = (rng_drug.random(
+            (max_atoms, max_atoms)) > 0.8).astype(np.float32)
 
     # ── Construire les triplets (drug, cell_line, ic50)
     samples_atoms, samples_adj, samples_gex, samples_mut, samples_cna, samples_ic50 = \
