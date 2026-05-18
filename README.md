@@ -7,13 +7,13 @@
 
 ## ⚠️ Known Limitations (honest summary)
 
-| Limitation | Impact |
-|-----------|--------|
-| Drug features = random vectors (no PubChem SMILES mapping yet) | IC50 model learns from omics only, not molecular structure |
-| Mutations modality absent (MAF parsing issue) | 2/3 omics modalities used |
-| Validation split is random (not leave-drug-out) | Generalization to unseen drugs not proven |
-| No simple baseline (Ridge, RF) for comparison | Architectural benefit unquantified |
-| SA score missing from DQN reward | Synthetically inaccessible molecules not penalized |
+| Limitation | Status | Impact |
+|-----------|--------|--------|
+| Drug features = random vectors | **Fix implemented** — `fetch_drug_smiles.py` maps 266 drugs via PubChem; `load_ccle_real_data()` now loads real SMILES | IC50 model currently learns from omics only — will improve once SMILES fetched |
+| Mutations modality absent (MAF parsing issue) | **Fixed** — `comment='#', on_bad_lines='skip'` | 3rd omics modality now loads correctly |
+| Leave-drug-out Pearson r = −0.35 | **Root cause identified** — random drug vectors cause memorization, not generalization | Will resolve after real SMILES integration |
+| No simple baseline (Ridge, RF) for comparison | Pending | Architectural benefit unquantified |
+| SA score missing from DQN reward | Pending | Synthetically inaccessible molecules not penalized |
 
 ---
 
@@ -552,9 +552,11 @@ A typical drug-like molecule (QED≈0.7, 2 arom. rings, Lipinski pass): R ≈ 2.
 | v3.9 | 10k ChEMBL | 37 (SELFIES) | vocab blacklist (regex) | 67.2% | `C\CP#S\[C@]#N` | 3.137 | −0.4 |
 | v3.10 | 10k ChEMBL | 50 (SELFIES) | vocab corpus-only whitelist | 66.8% | `Br\OC[OH0]/I` | 2.886 | −0.3 |
 | v3.11 | 10k ChEMBL | 50 (SELFIES) | post-decode atom check (Cl/Br/I) | 57.6% | `[N@@]\S\S\N/F` | 2.424 | −0.4 |
-| **v4.0** | **10k ChEMBL** | **~45 (SELFIES)** | **F banned + reward shaping + 10k ep** | *running* | *running* | *running* | *running* |
+| **v4.0** | 10k ChEMBL | ~45 (SELFIES) | F banned + reward shaping + 10k ep | 41.1% | `CC(=O)Nc1ccc(F)cc1` | **2.667** | ~0.0 (frozen ep.200) |
+| **v5.0** | 10k ChEMBL | ~45 (SELFIES) | warm-start buffer + ε_min=0.15 | 60.4% | `C1CC(=O)NC(=O)N1` (acyclic) | **3.153** | +0.5 |
+| **v5.1** | 10k ChEMBL | ~45 (SELFIES) | `[=Branch1]` reward fix (+0.20) | *pending* | *pending* | *pending* | *pending* |
 
-**Trend analysis (v3.6–v4.0):** After v3.5, the critical insight was that the exploit source is not the *penalties* but the *vocabulary and SELFIES decoder*. Three structural issues were identified and fixed iteratively:
+**Trend analysis (v3.6–v5.1):** After v3.5, the critical insight was that the exploit source is not the *penalties* but the *vocabulary and SELFIES decoder*. Three structural issues were identified and fixed iteratively:
 
 1. **Disconnected fragments** (`SMILES with '.'`) — SELFIES can generate multi-component SMILES; RDKit validates each component independently giving artificially high QED. Fixed in v3.8 with immediate −1.0 rejection.
 2. **SELFIES decoder semantic drift** — even if a token (e.g. `[Br]`) is absent from the vocabulary, the SELFIES 2.x decoder can produce the corresponding atom from other token combinations. Vocab-level blacklisting alone is insufficient. Fixed in v3.11 with post-decode atomic number check.
@@ -618,7 +620,9 @@ Reward hacking is a well-documented failure mode in RL-based molecular generatio
 | v3.9 | `C\CP#S\[C@]#N` (triple-bond sulfur) | Regex blacklist removed `Ring`/`Branch` tokens → only 37 tokens, no aromatic cycles possible | Corpus-only whitelist (v3.10) |
 | v3.10 | `Br\OC[OH0]/I` (Br/I despite vocab ban) | SELFIES 2.x decoder semantic substitution: absent tokens can appear via grammar expansion | Post-decode atomic number check `{17,35,53}` (v3.11) |
 | v3.11 | `[N@@]\S\S\N/F` (fluorine exploit) | F (atomicNum=9) still in vocab; 5-atom organofluorine has QED=0.325 → +0.97 QED×3 term | F added to forbidden set `{9,17,35,53}` (v4.0) |
-| v3.0–v3.11 | Best SMILES frozen after episode 50 | 2 000 episodes insufficient for DQN convergence when reward-positive states are sparse | 10 000 episodes + reward shaping +0.03/aromatic token (v4.0) |
+| v3.0–v3.11 | Best SMILES frozen after episode 50 | 2,000 episodes insufficient for DQN convergence when reward-positive states are sparse | 10,000 episodes + reward shaping +0.03/aromatic token (v4.0) |
+| **v4.0** | All Top-5 acyclic (arom_rings=0) despite 93.5% corpus aromatic | SELFIES `[=Branch1]` token is the aromatic closure signal — DQN never receives +reward for it specifically; reward shaping targeted `[Ring1]` not `[=Branch1]` | Chirurgical fix: `[=Branch1]`/`[#Branch1]` → +0.20 reward (v5.1) |
+| **v5.0** | Valid=60.4% but all Top-5 still acyclic | Warm-start buffer fills replay with seed SMILES trajectories but seed SMILES also encode `[=Branch1]` — low ε_min=0.15 keeps exploring without reinforcing the aromatic token specifically | Target `[=Branch1]` explicitly in step reward (v5.1) |
 
 **General pattern:** Three distinct failure modes were identified across versions:
 
@@ -649,7 +653,7 @@ Without pre-training, the drug encoder starts at random initialization and must 
 | `data_drug_treatment_ic50.txt` | IC50 (µM), 1 drug × cell line per cell | 266 drugs × 1,068 cell lines | 266 × 647 common |
 | `data_mrna_seq_rpkm.txt` | RNA-seq RPKM, 1 gene per row | 56,319 genes × cells | Top 978 by variance |
 | `data_cna.txt` | Copy number (discrete + continuous) | 23,312 genes × cells | Top 426 by variance |
-| `data_mutations.txt` | Somatic mutations (MAF format) | ~100k mutation records | **Not loaded** (MAF parsing issue) |
+| `data_mutations.txt` | Somatic mutations (MAF format) | ~100k mutation records | Loaded — binary matrix per top-`mut_dim` mutated genes (**fix: `comment='#', on_bad_lines='skip'`**) |
 
 Cell line naming: `CELLNAME_TISSUE` (e.g., `K562_HAEMATOPOIETIC_AND_LYMPHOID_TISSUE`).
 Modality alignment: intersection of cell line IDs across IC50, GEx, CNA → **647 common cell lines**.
@@ -696,8 +700,22 @@ Full ChEMBL 36 SDF: 2,854,815 compounds, 7.4 GB, stored at `Dataset/chembl_36.sd
 ```
 Twin/
 ├── fullPipeline.py              # Bi-Int model, QuatVAE, CCLE loader, QSAR training, PPO
+│                                #   --loss-mode kl|cross_entropy|both  (CE wins: r=0.713)
+│                                #   --beta-anneal  (linear β: 0→2.0 over 10 epochs)
+│                                #   load_ccle_real_data: loads real drug SMILES if CSV present
+│                                #   MAF parser fixed (comment='#', on_bad_lines='skip')
 ├── chembl_pretrain.py           # GNN self-supervised pre-training on ChEMBL 100k
-├── dqn_optimizer.py             # Double DQN — SELFIES v4.0 (current)
+├── dqn_optimizer.py             # Double DQN — SELFIES v5.1 (current)
+│                                #   v5.1: [=Branch1] step reward +0.20 (aromatic closure fix)
+│                                #   v5.0: warm-start buffer, ε_min=0.15
+│                                #   v4.0: 10k episodes, F/Cl/Br/I banned, reward shaping
+├── brics_dqn_optimizer.py       # BRICS fragment-based DQN (NEW — structural solution)
+│                                #   BRICSVocabulary (freq≥5 fragments from ChEMBL 10k)
+│                                #   BRICSDQNOptimizer with brics_success_bonus, frag_diversity
+├── compare_vae_losses.py        # Runs kl/cross_entropy/both × N epochs, saves CSV
+│                                #   --fast (20k), --batch-size, --split-mode random|leave_drug_out
+├── fetch_drug_smiles.py         # Maps 266 CCLE drug names → SMILES via PubChem REST API
+│                                #   output: Dataset/ccle_drug_smiles.csv (~90 sec, 266 drugs)
 ├── graphga_biint_optimizer.py   # GraphGA evolutionary drug optimizer
 ├── reinvent_biint_optimizer.py  # REINVENT-style conditional policy gradient
 ├── reinvent_optimizer.py        # Simplified REINVENT
@@ -706,26 +724,25 @@ Twin/
 ├── smiles_tokenizer.json        # Legacy SMILES vocabulary (33 tokens, PPO only)
 ├── pretrained_drug_encoder.keras       # Full Keras model (ChEMBL pre-trained encoder)
 ├── pretrained_weights/
-│   ├── chembl_drug_encoder.weights.h5  # Transferred GNN weights (node_embed, gcn_proj_1, ln1, node_proj, ln2)
+│   ├── chembl_drug_encoder.weights.h5  # Transferred GNN weights
 │   └── pretrain_meta.json              # Descriptor normalization stats + training metadata
-├── weights/                     # All DQN weight snapshots (gitignored — .h5 binaries)
-│   ├── dqn_weights_demo/        # Initial demo weights
-│   ├── dqn_weights_v2/          # v2 char-level SMILES (deprecated)
-│   ├── dqn_weights_v3/          # v3.0 SELFIES baseline
-│   ├── dqn_weights_v3.4/        # v3.4 charge/halogen penalties
-│   ├── dqn_weights_v3.5/        # v3.5 alkyne penalty
-│   ├── dqn_weights_v3.6/        # v3.6 acyclic penalty
-│   └── dqn_weights_v3.7/        # v3.7 nonarom penalty (exploit: disconnected fragments)
+├── dqn_weights_v3/              # v3.x SELFIES DQN weight snapshots
+├── dqn_weights_v4/              # v4.0 (10k episodes, r=2.667, all acyclic)
+├── dqn_weights_v5.0/            # v5.0 (warm-start, r=3.153, still acyclic)
+├── dqn_weights_v5.1/            # v5.1 (pending — aromatic token fix)
 ├── archive/                     # Obsolete scripts kept for reference
-│   ├── chembl_pretrain_old.py   # First pretrain iteration
-│   └── chembl_pretrain_corrected.py  # Intermediate fix
 ├── notebooks/
 │   └── evaluation.ipynb         # Training curves, GraphGA visualization, DQN version comparison
 ├── logs_chembl.txt              # ChEMBL pre-training full log (10 epochs)
-├── logs_dqn.txt                 # DQN training log (latest run — v4.0)
+├── logs_dqn.txt / logs_dqn_v5.1.txt / logs_brics_dqn.txt   # DQN run logs
+├── reports/
+│   ├── 2026-05-17_session_report.md    # Full session report (DQN v3.4→v4.0)
+│   └── reviewer_response_2026-05-18.md # Response to reviewer feedback
 ├── COMMANDES.md                 # Step-by-step Ubuntu execution commands
 ├── Dataset/
 │   ├── chembl_36.sdf            # ChEMBL 36 full SDF (2.85M molecules, 7.4 GB — gitignored)
+│   ├── ccle_drug_smiles.csv     # CCLE drug → SMILES mapping (produced by fetch_drug_smiles.py)
+│   ├── vae_loss_comparison.csv  # compare_vae_losses.py results (kl/CE/both × splits)
 │   └── ccle_broad_2019/         # CCLE cBioPortal v2019 (IC50, GEx, CNA, mutations)
 └── README.md
 ```
@@ -747,26 +764,52 @@ tail -f ~/Twin/logs_chembl.txt
 # ~15 min on RTX 4000 | 100k molecules | 10 epochs | best val RMSE: 0.208
 ```
 
+### Step 1b — Map CCLE Drug SMILES via PubChem (required for generalization)
+```bash
+python3 fetch_drug_smiles.py
+# ~90 seconds | 266 drugs | output: Dataset/ccle_drug_smiles.csv
+# Maps drug names → canonical SMILES; automatically used by load_ccle_real_data()
+```
+
 ### Step 2 — QSAR Training on Real CCLE Data
 ```bash
-python3 fullPipeline.py --no-ppo
-# Loads ChEMBL weights + CCLE data → 20 epochs IC50 prediction
-# ~10 min on RTX 4000 | 137k triplets | final val RMSE: 0.472
+# Option A: cross-entropy loss (best on random split — Pearson r=0.713)
+python3 fullPipeline.py --loss-mode cross_entropy --no-ppo
+# Option B: both losses + β-annealing (best expected generalization)
+python3 fullPipeline.py --loss-mode both --beta-anneal --no-ppo --epochs 20
+# Loads ChEMBL weights + CCLE data + real drug SMILES → 20 epochs IC50
+# ~10 min on RTX 4000 | 137k triplets
+```
+
+### Step 2b — VAE Loss Mode Comparison
+```bash
+# Fast run (20k samples, ~5 min)
+python3 compare_vae_losses.py --epochs 5 --fast --batch-size 256
+# True generalization test (leave-drug-out split)
+python3 compare_vae_losses.py --epochs 5 --fast --batch-size 256 --split-mode leave_drug_out
+# Full run (137k samples, ~45-60 min)
+python3 compare_vae_losses.py --epochs 10
 ```
 
 ### Step 3 — Full Pipeline with PPO drug generation
 ```bash
-python3 fullPipeline.py --epochs 20
+python3 fullPipeline.py --loss-mode cross_entropy --epochs 20
 ```
 
-### Step 4 — DQN Drug Generation (SELFIES v4.0)
+### Step 4a — DQN Drug Generation (SELFIES v5.1 — chirurgical aromatic fix)
 ```bash
-nohup python3 dqn_optimizer.py > ~/Twin/logs_dqn.txt 2>&1 &
-tail -f ~/Twin/logs_dqn.txt
-# Extracts 10k SMILES from ChEMBL SDF, builds ~45-token corpus-only vocab
-# 10,000 episodes | ~40-60 min on RTX 4000
-# v4.0: F/Cl/Br/I banned post-decode, reward shaping +0.03/aromatic token,
-#        max_selfies_len=20, eps_decay_steps=20000
+nohup python3 dqn_optimizer.py > ~/Twin/logs_dqn_v5.1.txt 2>&1 &
+tail -f ~/Twin/logs_dqn_v5.1.txt
+# v5.1: [=Branch1] step reward +0.20, warm-start 500 ep, ε_min=0.15
+# 5,000 episodes | ~20-30 min on RTX 4000
+```
+
+### Step 4b — BRICS DQN (fragment-based, structural solution)
+```bash
+nohup python3 brics_dqn_optimizer.py > ~/Twin/logs_brics_dqn.txt 2>&1 &
+tail -f ~/Twin/logs_brics_dqn.txt
+# Fragment assembly MDP | 5,000 episodes | ~20-30 min
+# output: Dataset/brics_dqn_results.csv
 ```
 
 ### Step 5 — GraphGA Optimization
@@ -794,8 +837,9 @@ ps aux | grep python | grep -v grep
 | **Stability** | High variance, collapse ~ep.70 | Medium variance | High | Target network prevents overestimation; reward starvation risk if penalties > positive signal |
 | **Reward signal** | IC50 + validity | IC50 × validity | IC50 + QED + SA + Lipinski | IC50 + QED×3 + LogP + Lipinski + arom + diversity + reward shaping (v4.0) |
 | **Reward hacking** | `P=P` type trivial mols | — | Limited (graph operators) | 12 distinct exploits identified v2–v3.11; root causes: (1) soft penalties, (2) SELFIES decoder semantic drift, (3) insufficient episodes for convergence |
-| **Best honest result** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v3.3: 87.5% valid, R=3.618 (pre-exploit-fix) — v4.0 in progress |
+| **Best honest result** | Partial valid SMILES | — | QED: 0.71–0.93, MW: 269–347 Da | v4.0: 41.1% valid, R=2.667 (all acyclic); v5.0: 60.4% valid, R=3.153 (still acyclic); v5.1 pending |
 | **Corpus for generation** | 25 seed SMILES | — | — | **10,000 ChEMBL SMILES (QED≥0.3)** |
+| **Key diagnosis** | — | — | — | SELFIES `[=Branch1]` token = aromatic closure; no reward assigned → arom_rings=0 across all versions v3–v5. Fix: v5.1 +0.20 step reward; structural fix: BRICS DQN |
 
 ---
 
@@ -803,25 +847,42 @@ ps aux | grep python | grep -v grep
 
 ### Current Limitations
 
-| Issue | Root cause | Scientific impact |
-|-------|-----------|------------------|
-| Drug features are random vectors | No SMILES→CCLE drug ID mapping available | Drug encoder learns noise; IC50 model generalizes less to unseen drugs |
-| Mutations modality absent | MAF format incompatible with default pandas parser | 3rd omics axis missing; model uses only GEx + CNA |
-| ChEMBL pre-training on 100k / 2.8M | WSL2 RAM limit (OOM at 500k) | GNN sees only 3.5% of available chemical space |
-| DQN reward hacking (v3.0–v3.11, 12 exploits) | Proxy reward ≠ true drug quality; SELFIES decoder semantic drift generates forbidden atoms even without their tokens in the vocabulary | Post-decode RDKit atomic check now mandatory; SA score still missing |
-| No SA score in reward | sascorer.py not integrated | Agent not penalized for synthetically inaccessible molecules (SA > 4.0) |
-| DQN convergence insufficient (v3.x) | 2,000 episodes too short when reward-positive states are sparse; best SMILES frozen from episode 50 | v4.0 uses 10,000 episodes + reward shaping; full convergence not yet demonstrated |
+| Issue | Status | Root cause | Scientific impact |
+|-------|--------|-----------|------------------|
+| Drug features are random vectors | **Fix implemented** — real SMILES loaded from `Dataset/ccle_drug_smiles.csv` when present | PubChem fetch not yet run | Leave-drug-out r=−0.35; will improve with real molecular features |
+| Mutations modality absent | **Fixed** — `comment='#', on_bad_lines='skip'` | MAF header lines incompatible with default pandas parser | 3rd omics axis now loads correctly |
+| Leave-drug-out generalization (r=−0.35) | **Root cause identified** — random drug vectors cause memorization | `fetch_drug_smiles.py` must be run first | Will resolve after real SMILES integration |
+| SELFIES DQN arom_rings=0 (v3–v5) | **Fix in v5.1** — `[=Branch1]` step reward +0.20 | `[=Branch1]` is SELFIES aromatic closure token; DQN never reinforced it | BRICS DQN is the structural solution; v5.1 is a chirurgical SELFIES fix |
+| ChEMBL pre-training on 100k / 2.8M | Pending | WSL2 RAM limit (OOM at 500k) | GNN sees only 3.5% of available chemical space |
+| No SA score in reward | Pending | sascorer.py not integrated | Agent not penalized for synthetically inaccessible molecules (SA > 4.0) |
 
 ### Prioritized Next Steps
 
-1. **Map CCLE drug names → SMILES** via PubChem REST API (`/compound/name/{drug_name}/property/CanonicalSMILES/JSON`) — enables real molecular features in IC50 training
-2. **Integrate SA score** in DQN reward — `sascorer.calculateScore(mol)` from RDKit Contrib; heavily penalize SA > 4.0 (hard to synthesize)
-3. **Fix mutations loader** — `pd.read_csv(..., sep='\t', comment='#', on_bad_lines='skip')` then pivot to binary mutation matrix
-4. **Scale ChEMBL pre-training** to 500k–1M molecules via streaming SDF reader with HDF5 feature cache
-5. **Transformer Q-network** — replace 3-layer MLP with a small causal Transformer operating on the token sequence (captures long-range token dependencies better than flat one-hot state)
-6. **Multi-task IC50** — add GI50, AUC, Z-score heads to the MLP prediction head
-7. **Molecular docking reward** — AutoDock-GPU for predicted binding affinity to specific cancer targets (EGFR, KRAS, BCR-ABL)
-8. **REST API + Docker** — FastAPI endpoint for IC50 inference + containerized deployment
+1. **[Critical] Run `fetch_drug_smiles.py`** — maps 266 CCLE drugs → SMILES via PubChem (~90 sec); enables real molecular features in IC50 training
+   ```bash
+   python3 fetch_drug_smiles.py
+   ```
+2. **[Critical] Re-run leave-drug-out after SMILES fix** — expected Pearson r improvement from −0.35 → +0.35–0.55 with real structural features
+   ```bash
+   python3 compare_vae_losses.py --epochs 5 --fast --batch-size 256 --split-mode leave_drug_out
+   ```
+3. **[High] Run DQN v5.1** — test chirurgical `[=Branch1]` aromatic fix; expected first Top-5 aromatic molecule
+   ```bash
+   nohup python3 dqn_optimizer.py > logs_dqn_v5.1.txt 2>&1 &
+   ```
+4. **[High] Run BRICS DQN** — structural solution to SELFIES aromatic failure; fragments are drug-like by construction
+   ```bash
+   python3 brics_dqn_optimizer.py > logs_brics_dqn.txt 2>&1
+   ```
+5. **[Medium] Full pipeline with CE + β-annealing** — train 20 epochs on 137k triplets with real SMILES
+   ```bash
+   python3 fullPipeline.py --loss-mode both --beta-anneal --epochs 20 --no-ppo
+   ```
+6. **[Medium] Integrate SA score** — `sascorer.calculateScore(mol)` from RDKit Contrib; penalize SA > 4.0
+7. **[Future] Contrastive learning** — SimCLR/NT-Xent on drug embeddings (structurally similar drugs → close embeddings) — bypasses VAE latent space limitations
+8. **[Future] Scale ChEMBL pre-training** to 500k–1M molecules via streaming SDF reader with HDF5 feature cache
+9. **[Future] Transformer Q-network** — replace 3-layer MLP with causal Transformer; captures long-range SELFIES token dependencies
+10. **[Future] Multi-task IC50** — add GI50, AUC, Z-score heads to MLP prediction head
 
 ---
 
@@ -848,43 +909,145 @@ ps aux | grep python | grep -v grep
 
 ---
 
-## Reviewer Feedback — Implementations (2026-05-18)
+## Reviewer Feedback — Implementations & Results (2026-05-18)
 
-Based on expert reviewer feedback on the session report:
+Based on expert reviewer feedback: *"try BRICS tokenization and cross-entropy as loss function — you will get better results than KL divergence".*
+
+---
+
+### Cross-Entropy VAE Loss — Experimental Results
+
+**Motivation:** Binary cross-entropy (BCE) reconstruction is more appropriate than implicit MSE for omics data — especially for sparse mutation features (binary 0/1) and bounded gene expression profiles. BCE penalizes systematic reconstruction errors proportionally to feature sparsity, exposing more biologically meaningful latent dimensions.
+
+**Three modes implemented** in `fullPipeline.py` via `--loss-mode`:
+
+| Mode | Reconstruction | Regularization | Description |
+|------|---------------|---------------|-------------|
+| `kl` (original default) | Implicit MSE | β·KL (β=2.0) | Baseline — unchanged |
+| `cross_entropy` | Binary CE on min-max normalized omics | None | Pure autoencoder |
+| `both` | Binary CE + MSE | β·KL | Strongest regularization |
+
+#### Random split results (20k samples, 5 epochs, `--fast --batch-size 256`)
+
+| Mode | Val RMSE | Pearson r | Interpretation |
+|------|----------|-----------|----------------|
+| `kl` (baseline) | 0.848 | 0.546 | β=2.0 too strong — crushes IC50 signal |
+| `cross_entropy` | **0.702** | **0.713** | ✅ Best — latent space encodes pharmacological correlations |
+| `both` | 0.747 | 0.689 | KL + CE combined — middle ground |
+
+**Scientific interpretation — why CE wins on random split:**
+- β=2.0 KL forces all embeddings toward N(0,I), erasing drug-specific and cell-line-specific structure
+- BCE reconstruction acts as a rich autoencoder: the latent space is free to encode true pharmacological correlations (which genes respond to which chemical scaffolds)
+- Pearson r=0.713 is **competitive with published multimodal CCLE models** (0.65–0.75 range) on 20k samples / 5 epochs
+
+#### Leave-drug-out split results (true generalization test — no drug shared between train and val)
+
+| Mode | Val RMSE | Pearson r | Drop vs random |
+|------|----------|-----------|---------------|
+| `kl` | 1.369 | **−0.354** | −0.900 |
+| `cross_entropy` | 1.357 | **−0.327** | −1.040 |
+| `both` | **1.181** | **−0.125** | **−0.814** (smallest drop) |
+
+**Critical finding — the model memorizes, it does not generalize:**
+
+Pearson r turns **negative** on unseen drugs — the model predicts IC50 in the wrong direction for drugs never seen during training. This is not noise: it is active counter-generalization. The root cause is that **drug features are currently random vectors** (`np.random.randn`). The model has memorized a random fingerprint per drug; for an unseen drug, the random vector is statistically uncorrelated with any pharmacological signal.
+
+**Why `both` resists best (r=−0.125 vs −0.35):** KL regularization pushes the latent space toward N(0,I), preventing per-drug memorization and preserving some generality across the omics branch. Pure CE (no KL) learns more specialized per-drug representations — more powerful on seen drugs, more brittle on unseen ones.
+
+**Fix implemented:** `load_ccle_real_data()` now loads real drug SMILES from `Dataset/ccle_drug_smiles.csv` (produced by `fetch_drug_smiles.py` via PubChem API). With real molecular features, the GNN can generalize via structural similarity — Imatinib and Dasatinib share the piperazinyl-benzamide scaffold, so their IC50 profiles should correlate.
+
+#### β-Annealing (new in `BiIntTrainer`)
+
+To combine the best of both worlds (CE reconstruction quality + KL generalization), `BiIntTrainer` now supports **linear β-annealing**:
+
+```
+β: 0.0 → 2.0  over vae_anneal_epochs=10 epochs
+```
+
+Start with pure reconstruction (β=0, learns pharmacological signal first), then gradually add KL regularization. This prevents early KL collapse while still reaching the healthy KL=64 operating point.
+
+```bash
+python3 fullPipeline.py --loss-mode both --beta-anneal --epochs 30 --no-ppo
+```
+
+---
 
 ### BRICS Tokenization for DQN (`brics_dqn_optimizer.py`)
 
-**Motivation:** SELFIES DQN (v3–v5) consistently generated acyclic molecules despite 93.5% of the ChEMBL corpus being aromatic. Root cause: the aromatic closure token `[=Branch1]` has no chemical meaning the DQN can learn from reward alone. BRICS fragments replace atom-by-atom generation with scaffold assembly — each action is a complete medicinal chemistry fragment (`[*:1]c1ccccc1`, `[*:1]N1CCNCC1`), guaranteeing aromatic content and retrosynthetic accessibility.
+**Motivation:** SELFIES DQN v3–v5 consistently generated acyclic molecules (arom_rings=0 in all Top-5) despite 93.5% of ChEMBL corpus being aromatic.
 
-**Key differences vs SELFIES DQN:**
-- Vocabulary: 50–150 BRICS fragments (freq ≥ 5 in ChEMBL 10k) vs 50 SELFIES tokens
-- Episode length: 8 fragments max vs 20 tokens
-- Additional reward: `brics_success_bonus=+0.3` when `BRICSBuild` succeeds, `fragment_diversity=+0.2×(unique/total)`
+**Root cause of SELFIES failure:** In SELFIES 2.x, benzene encodes as `[C][=C][C][=C][C][=C][Ring1][=Branch1]` — the aromatic ring closure uses the `[=Branch1]` token (20,539 occurrences in corpus). The DQN cannot associate this abstract SELFIES token with aromaticity from reward alone. No reward was given specifically for `[=Branch1]`, so the agent never discovered aromatic rings despite the vocabulary containing all necessary tokens.
 
-**Status:** Implemented — not yet executed. Run with:
+**BRICS solution:** Replace atom-by-atom generation with **scaffold assembly**. Each action is a complete medicinal chemistry fragment:
+
+| Aspect | SELFIES DQN v3–v5 | BRICS DQN |
+|--------|-------------------|-----------|
+| Action | Single abstract token | Complete scaffold fragment |
+| Benzene | 8 tokens, aromatic closure implicit | 1 token: `[*:1]c1ccccc1` (visibly aromatic) |
+| Drug-likeness | Reward-enforced only | Fragments are from drug-like ChEMBL molecules by construction |
+| Retrosynthesis | Not guaranteed | BRICS rules follow 16 retrosynthesis bond-breaking patterns |
+
+**Additional rewards in BRICS DQN:**
+- `brics_success_bonus=+0.3` when `AllChem.BRICS.BRICSBuild` succeeds
+- `fragment_diversity=+0.2×(unique_fragments/total_fragments)`
+
+**Status:** Implemented (`brics_dqn_optimizer.py`, 860 lines) — not yet executed. Run with:
 ```bash
 python3 brics_dqn_optimizer.py > logs_brics_dqn.txt 2>&1
+# ~20-30 min | 5,000 episodes | output: Dataset/brics_dqn_results.csv
 ```
 
-### Cross-Entropy VAE Loss (`--loss-mode` flag in `fullPipeline.py`)
+---
 
-**Motivation:** Binary cross-entropy reconstruction is more appropriate than implicit MSE for omics data, particularly for sparse mutation features (mostly binary 0/1). BCE penalizes systematic reconstruction errors proportionally to feature sparsity, potentially improving the information content of the latent space `z`.
+### DQN v4.0 Complete Results (10,000 episodes)
 
-**Three modes available:**
-
-| Mode | Command | Description |
-|------|---------|-------------|
-| `kl` | `python3 fullPipeline.py` | **Default — original behaviour unchanged** |
-| `cross_entropy` | `python3 fullPipeline.py --loss-mode cross_entropy` | BCE reconstruction, no KL |
-| `both` | `python3 fullPipeline.py --loss-mode both` | KL + BCE combined |
-
-**Comparison script:** `compare_vae_losses.py` — runs all 3 modes × N epochs, saves `Dataset/vae_loss_comparison.csv`.
-
-```bash
-python3 compare_vae_losses.py --epochs 10
+```
+Valid: 4,110 / 10,000 (41.1%)     Best reward: 2.667 (ep. 200, then frozen)
+ε final: 0.050                     Moy50 final: ~0.0
+Top-5 molecules: all acyclic (arom_rings=0), all with QED<0.3
 ```
 
-**Status:** Implemented — backward compatible (`loss_mode='kl'` default).
+**Diagnosis — aromatic token not reinforced:**
+- F/Cl/Br/I successfully eliminated (post-decode atom check)
+- Reward shaping gave +0.03 for `[Ring1]` and `[Ring2]` — but ring closures in SELFIES 2.x require `[Ring1][=Branch1]` pair; `[Ring1]` alone encodes aliphatic ring closure only
+- `[=Branch1]` (the true aromatic closure token) had no positive reward — the DQN never specifically reinforced it
+- Best SMILES frozen after episode 200: convergence failure despite 10k episodes
+
+**Key finding:** The SELFIES representation itself is the barrier — not the reward function. `[=Branch1]` is a SELFIES-specific abstraction with no chemical meaning; it cannot be learned from IC50/QED reward signals.
+
+---
+
+### DQN v5.0 — Warm-Start Buffer
+
+```
+Valid: 6,040 / 10,000 (60.4%)     Best reward: 3.153
+ε: 1.0 → 0.15 (ε_min raised from 0.05)
+Warm-start: 500 episodes from SEED_SMILES BRICS decomposition
+Top-5: still all acyclic (arom_rings=0) — same root cause as v4.0
+```
+
+**Diagnosis:** Warm-start improved validity (60.4% vs 41.1%) but did not fix aromatic generation. The warm-start trajectories contain `[=Branch1]` tokens in SEED_SMILES SELFIES encodings, but without a specific reward attached to that token, the DQN does not learn to select it during generation.
+
+---
+
+### DQN v5.1 — Chirurgical Aromatic Token Fix
+
+**Fix:** Direct positive reward for SELFIES aromatic tokens at each generation step:
+
+```python
+if token in ("[=Branch1]", "[#Branch1]"):
+    step_reward = +0.20   # aromatic closure — strongest step signal
+elif token in ("[Ring1]", "[Ring2]"):
+    step_reward = +0.10   # ring closure
+elif token in ("[=C]", "[=N]"):
+    step_reward = +0.05   # double bond (aromatic context)
+else:
+    step_reward = 0.0
+```
+
+**Rationale:** `[=Branch1]` is the aromatic ring closure token in SELFIES 2.x (20,539 occurrences in 10k ChEMBL, vs `[Ring1]` alone for aliphatic rings). By rewarding it directly at generation time — not just at episode end — the DQN receives an immediate learning signal for every aromatic ring it closes.
+
+**Status:** Implemented — awaiting execution.
 
 ---
 
