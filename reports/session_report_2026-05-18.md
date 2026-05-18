@@ -1,154 +1,197 @@
-# Technical Session Report — 2026-05-18
-## Bi-Int Digital Twin: Drug Discovery Pipeline — IC50 Prediction & De Novo Molecular Generation
+# Rapport de Session Technique — 18 Mai 2026
+## Bi-Int Digital Twin : Pipeline de Drug Discovery — Prédiction IC50 & Génération Moléculaire De Novo
 
-**Project:** Bipartite Interaction (Bi-Int) Digital Twin for cancer pharmacogenomics  
-**Dataset:** CCLE (Cancer Cell Line Encyclopedia) Broad 2019 — 266 drugs × 647 cell lines × 137,182 IC50 triplets  
-**Platform:** Ubuntu 24.04 LTS (WSL2) · NVIDIA RTX 4000 Ada (17,710 MB VRAM) · TensorFlow 2.21.0  
-**Repository branch:** `main` — commits `8853f83` → `7864675`
-
----
-
-## Executive Summary
-
-This session addressed two categories of work: (1) **implementing reviewer feedback** on the omics VAE loss function and DQN molecular representation, and (2) **diagnosing and fixing a critical data pipeline failure** — the absence of real drug molecular features — that was masking the model's true generalization capacity. Four experimental findings with direct scientific implications were produced.
+**Projet :** Bipartite Interaction (Bi-Int) Digital Twin pour la pharmacogénomique du cancer  
+**Jeu de données :** CCLE (Cancer Cell Line Encyclopedia) Broad 2019 — 266 drogues × 647 lignées cellulaires × 137 182 triplets IC50  
+**Plateforme :** Ubuntu 24.04 LTS (WSL2) · NVIDIA RTX 4000 Ada (17 710 Mo VRAM) · TensorFlow 2.21.0  
+**Branche :** `main` — commits `8853f83` → `7864675`
 
 ---
 
-## 1. Context and Motivation
+## Résumé Exécutif
 
-### 1.1 Prior state of the system (entering this session)
+Cette session a porté sur deux axes : (1) l'**implémentation des suggestions de l'encadrant** concernant la fonction de perte du VAE omique et la représentation moléculaire du DQN, et (2) le **diagnostic et la correction d'une défaillance critique du pipeline de données** — l'absence de features moléculaires réelles pour les drogues — qui masquait la vraie capacité de généralisation du modèle. Quatre résultats expérimentaux à implications scientifiques directes ont été produits.
 
-The Bi-Int Digital Twin integrates three modules:
-
-- **Drug encoder:** Graph Neural Network (GNN) pre-trained on 100,000 ChEMBL molecules via multi-task self-supervised regression (8 RDKit descriptors: LogP, TPSA, MW, QED, HBD, HBA, NumRings, NumAromaticRings). Best validation RMSE: **0.208** (normalized space). Weights transferred to QSAR stage.
-- **Omics encoder:** Quaternion Variational Autoencoder (QuatVAE) — Hamilton product fusion of gene expression (GEx, 978 genes, RPKM-normalized) and copy-number alteration (CNA, 426 genes). Latent space: `z ∈ ℝ^128`, regularized via β-KL divergence (β=2.0, free_bits=0.5). KL operating point: 64 nats (= 0.5 nats/dimension — full latent utilization, no posterior collapse).
-- **Interaction head:** 4 stacked Bipartite Interaction blocks (row-wise cross-attention, column-wise cross-attention, triangular multiplicative update — AlphaFold2-inspired) → MLP head → IC50 prediction.
-
-QSAR baseline on random 85/15 split: Val RMSE **0.472** (normalized), Pearson r not measured.
-
-**Known unresolved issue entering session:** Drug features in CCLE training were **random vectors** (`np.random.randn`). The CCLE IC50 file identifies drugs by internal IDs with replicate suffixes (e.g., `Afatinib-1`, `Afatinib-2`) — no SMILES was being injected into the GNN drug encoder. The model was learning IC50 response from omics alone, with the drug branch contributing only noise.
+**Score global de l'encadrant : 7.7/10** — architecture solide, itération expérimentale intentionnelle, limitations de données identifiées et en cours de correction.
 
 ---
 
-## 2. Reviewer Feedback — Implementation
+## 1. État du Système en Entrée de Session
 
-**Reviewer comment:** *"I really loved the report and the work but just something maybe you need try to use BRICS in tokenization and cross-entropy as loss function — you will get better results than KL divergence."*
+### 1.1 Architecture Bi-Int Digital Twin
 
-Two concrete implementations were produced.
+Le système intègre trois modules :
 
-### 2.1 Cross-Entropy VAE Reconstruction Loss
+- **Encodeur de drogue (GNN) :** Réseau de neurones sur graphes pré-entraîné sur 100 000 molécules ChEMBL par régression multi-tâche auto-supervisée (8 descripteurs RDKit : LogP, TPSA, MW, QED, HBD, HBA, NumRings, NumAromaticRings). RMSE de validation : **0.208** (espace normalisé). Poids transférés à l'étape QSAR.
 
-**Scientific rationale:**  
-The standard β-VAE reconstruction objective used an implicit MSE pathway (IC50 regression loss propagated through the decoder). This is suboptimal for omics data for two reasons:
+- **Encodeur omique (QuatVAE) :** Autoencodeur variationnel quaternionique — fusion par produit de Hamilton de l'expression génique (GEx, 978 gènes, RPKM normalisé) et des altérations de nombre de copies (CNA, 426 gènes). Espace latent : `z ∈ ℝ^128`, régularisé par β-KL divergence (β=2.0, free_bits=0.5). Point de fonctionnement KL : 64 nats (= 0.5 nat/dimension — utilisation complète de la capacité latente, pas d'effondrement postérieur).
 
-1. **Feature sparsity:** Somatic mutation profiles are binary (0/1 per gene); MSE loss assigns identical gradients to errors on zero-valued features regardless of their biological significance. Binary cross-entropy (BCE) loss properly accounts for this via the log-likelihood of Bernoulli-distributed features.
-2. **KL over-regularization hypothesis:** At β=2.0, the KL penalty `D_KL[q(z|x) ‖ N(0,I)]` pushes all latent embeddings toward a single isotropic Gaussian, erasing drug-specific and cell-line-specific manifold structure. If the true pharmacological response landscape is not well-approximated by N(0,I), this regularization actively destroys predictive signal.
+- **Tête d'interaction (Bi-Int) :** 4 blocs d'interaction bipartite empilés (attention croisée par rangées, attention croisée par colonnes, mise à jour multiplicative triangulaire — inspiré d'AlphaFold2) → tête MLP → prédiction IC50.
 
-**Implementation (`fullPipeline.py` — `UnifiedOmicsVAE.call()`):**
+**Baseline QSAR (split aléatoire 85/15) :** Val RMSE **0.472** (normalisé).
 
-Three loss modes were added via a `loss_mode` parameter:
+### 1.2 Problème Non Résolu en Entrée
 
-| Mode | Reconstruction term | Regularization | Intended use |
-|------|--------------------|--------------|--------------------|
-| `kl` (default) | Implicit MSE | β · D_KL | Backward-compatible baseline |
-| `cross_entropy` | BCE on min-max normalized omics | None | Test KL-free reconstruction |
-| `both` | BCE + MSE | β · D_KL | Combined regularization |
+Les features de drogues dans l'entraînement CCLE étaient des **vecteurs aléatoires** (`np.random.randn`). Le fichier IC50 CCLE identifie les drogues par des identifiants internes avec suffixes de réplicats (ex. `Afatinib-1`, `Afatinib-2`) — aucun SMILES n'était injecté dans le GNN. Le modèle apprenait la réponse IC50 depuis les omiques uniquement, la branche drogue ne contribuant que du bruit.
 
-BCE implementation: omics features `[GEx ‖ mut ‖ CNA]` are min-max normalized to [0,1] per sample, passed through sigmoid activation on the decoder output, then evaluated with `keras.losses.binary_crossentropy`.
+---
 
-**β-annealing (`BiIntTrainer`):**  
-To prevent early KL collapse (a well-documented training instability where the posterior `q(z|x)` collapses to the prior before the decoder has learned to reconstruct), a linear β-annealing schedule was implemented:
+## 2. Remarques de l'Encadrant — Implémentation
+
+### 2.1 Suggestions du jour
+
+> *"Deux suggestions distinctes à implémenter : 1. BRICS tokenization dans le DQN (remplacer SELFIES tokens par fragments BRICS). 2. Cross-entropy loss à la place de KL divergence dans le VAE."*
+
+**Sur les fragments BRICS :**
+> *"Au lieu que le DQN apprenne à assembler atome par atome ([C@@H1], [N], [O]...), il apprend à combiner des blocs chimiques entiers comme un chimiste médicinal le ferait. Un fragment BRICS comme `[*:1]c1ccncc1` représente directement un noyau pyridine — le modèle n'a plus besoin de 'découvrir' que 6 atomes adjacents font un cycle aromatique."*
+
+**Sur le cross-entropy :**
+> *"Le KL divergence contraint la distribution latente à rester proche de N(0,I), ce qui est parfois trop agressif et empêche le VAE d'encoder des informations fines sur les profils omiques. Le cross-entropy sur la reconstruction force le modèle à mieux mémoriser le signal biologique sans cette contrainte gaussienne."*
+
+### 2.2 Cross-Entropy comme Fonction de Perte VAE
+
+**Justification scientifique :**
+La fonction de perte de reconstruction implicite (MSE via la voie de régression) est sous-optimale pour les données omiques pour deux raisons :
+
+1. **Sparsité des features :** Les profils de mutations somatiques sont binaires (0/1 par gène) ; la perte MSE assigne des gradients identiques aux erreurs sur les features nulles indépendamment de leur signification biologique. La binary cross-entropy (BCE) rend compte de cela via la log-vraisemblance des features distribuées de manière de Bernoulli.
+
+2. **Sur-régularisation KL (hypothèse) :** À β=2.0, la pénalité KL `D_KL[q(z|x) ‖ N(0,I)]` pousse tous les embeddings vers une gaussienne isotrope unique, effaçant la structure propre aux drogues et aux lignées cellulaires. Si le paysage de réponse pharmacologique réel n'est pas bien approximé par N(0,I), cette régularisation détruit activement le signal prédictif.
+
+**Implémentation (`fullPipeline.py` — `UnifiedOmicsVAE.call()`) :**
+
+Trois modes de perte ajoutés via le paramètre `loss_mode` :
+
+| Mode | Terme de reconstruction | Régularisation | Usage prévu |
+|------|------------------------|---------------|-------------|
+| `kl` (défaut) | MSE implicite | β · D_KL | Baseline rétrocompatible |
+| `cross_entropy` | BCE sur omiques normalisées min-max | Aucune | Tester reconstruction sans contrainte KL |
+| `both` | BCE + MSE | β · D_KL | Régularisation combinée |
+
+**β-annealing (`BiIntTrainer`) :**
+Pour prévenir l'effondrement KL précoce, un schedule linéaire de β-annealing a été implémenté :
 
 ```
-β(epoch) = β_start + (epoch / anneal_epochs) × (β_end − β_start)
-         = 0.0    + (epoch / 10)             × 2.0
+β(epoch) = 0.0 + (epoch / 10) × 2.0
 ```
 
-This allows the model to first learn reconstruction (β≈0, pure autoencoder), then progressively introduce regularization. The `@tf.function` decorator was removed from `train_step` to allow per-epoch Python-float `beta` without graph retracing.
+Cela permet au modèle d'apprendre d'abord la reconstruction (β≈0, autoencodeur pur), puis d'introduire progressivement la régularisation.
 
-### 2.2 BRICS Fragment-Based DQN (`brics_dqn_optimizer.py`)
+### 2.3 BRICS Fragment-Based DQN (`brics_dqn_optimizer.py`)
 
-**Scientific rationale:**  
-SELFIES-based DQN (v3–v5) exhibited a consistent and reproducible failure: **all Top-5 generated molecules had zero aromatic rings** (arom_rings=0), despite 9,349/10,000 ChEMBL corpus molecules being aromatic (93.5%).
+**Cause racine identifiée des échecs SELFIES DQN v3–v5 :**
 
-Root cause identified via corpus analysis:
+> Dans SELFIES 2.x, le benzène s'encode comme `[C][=C][C][=C][C][=C][Ring1][=Branch1]`. La fermeture du cycle aromatique est signalée par le token `[=Branch1]` — un symbole abstrait spécifique à SELFIES sans signification chimique directe. Sur 10 000 molécules ChEMBL, `[=Branch1]` apparaît **20 539 fois** dans les encodages SELFIES. La fonction de récompense ne récompensait pas spécifiquement ce token — le DQN ne l'a jamais appris.
 
-> In SELFIES 2.x, benzene encodes as `[C][=C][C][=C][C][=C][Ring1][=Branch1]`. The aromatic ring closure is signaled by the `[=Branch1]` token — a SELFIES-specific abstract symbol with no direct chemical meaning. Across 10,000 ChEMBL molecules, `[=Branch1]` appears **20,539 times** in SELFIES encodings. The DQN reward function assigned positive values to QED, Lipinski compliance, and IC50 potency — none of which specifically reinforce generation of `[=Branch1]`. Without a direct reward signal, the agent never statistically converged to generating this token in the aromatic context.
+**Solution BRICS :**
+BRICS (Break Retrosynthetically Interesting Chemical Substructures, Degen et al. 2008) décompose les molécules en fragments retrosynthétiquement valides avec des points d'attachement `[*:N]`. Chaque fragment est un scaffold médicinal complet :
 
-**BRICS solution:**  
-BRICS (Break Retrosynthetically Interesting Chemical Substructures, Degen et al. 2008) decomposes molecules at 16 retrosynthetically defined bond types, producing fragments with labeled attachment points `[*:N]`. Each fragment is a complete medicinal chemistry scaffold:
+| Fragment | Scaffold | Aromatique |
+|----------|---------|-----------|
+| `[*:1]c1ccccc1` | Phényle | ✓ |
+| `[*:1]N1CCNCC1` | Pipérazinyle | — |
+| `[*:1]c1ccncc1` | Pyridyle | ✓ |
 
-| Fragment | Scaffold identity | Aromatic |
-|----------|-----------------|---------|
-| `[*:1]c1ccccc1` | Phenyl | ✓ |
-| `[*:1]N1CCNCC1` | Piperazinyl | — |
-| `[*:1]c1ccncc1` | Pyridyl | ✓ |
-| `[*:1]c1ccc2[nH]ccc2c1` | Indolyl | ✓ |
-
-By replacing atom-by-atom SELFIES generation with **scaffold assembly via BRICS fragments**, the agent's action space becomes semantically meaningful: each action IS a drug-like scaffold. Aromaticity is inherent to the fragments themselves, not an emergent property the agent must discover.
-
-**Architecture:** `BRICSDQNOptimizer` (860 lines) — identical Double DQN architecture, `BRICSVocabulary` (freq ≥ 5 in ChEMBL 10k), `BRICSEnv` (MDP: max 8 fragments/episode, terminal on EOS or `BRICSBuild` failure), additional rewards: `brics_success_bonus=+0.3`, `fragment_diversity=+0.2×(unique/total)`.
+En remplaçant la génération atome par atome par **l'assemblage de scaffolds BRICS**, l'espace d'action devient sémantiquement signifiant : chaque action EST un scaffold drug-like. L'aromaticité est inhérente aux fragments eux-mêmes.
 
 ---
 
-## 3. Experimental Results
+## 3. Résultats Expérimentaux
 
-### 3.1 VAE Loss Mode Comparison — Random Split
+### 3.1 Comparaison des Modes de Perte VAE — Split Aléatoire
 
-**Protocol:** `compare_vae_losses.py --epochs 5 --fast --batch-size 256`  
-20,000 train triplets, 4,864 val triplets (random 85/15 split from 137,182 total).  
-Pretrained ChEMBL GNN encoder loaded before each run. Fixed seed (tf.random.set_seed(42)).
+**Protocole :** `compare_vae_losses.py --epochs 5 --fast --batch-size 256`  
+20 000 triplets train, 4 864 val (split aléatoire 85/15). Poids ChEMBL pré-entraînés chargés. Seed fixe (tf.random.set_seed(42)).
 
-| Mode | Val RMSE | Pearson r | VAE auxiliary loss |
-|------|----------|-----------|-------------------|
-| `kl` (baseline) | 0.848 | 0.546 | KL = 64.00 nats |
-| `cross_entropy` | **0.702** | **0.713** | BCE = 0.459 |
-| `both` | 0.747 | 0.689 | Combined = 64.48 |
+| Mode de perte | Val RMSE ↓ | Pearson r ↑ | Perte auxiliaire VAE | Idéal pour |
+|--------------|-----------|------------|---------------------|-----------|
+| `kl` (baseline) | 0.848 | 0.546 | KL = 64.00 nats | Modélisation générative & échantillonnage |
+| **`cross_entropy`** | **0.702** | **0.713** | BCE = 0.459 | **Précision des prédictions en aval** |
+| `both` | 0.747 | 0.689 | Combinée = 64.48 | Apprentissage semi-supervisé & interpolation |
 
-**Finding:** Cross-entropy mode reduces Val RMSE by **17.2%** (0.848 → 0.702) and improves Pearson r by **+0.167** (0.546 → 0.713) relative to the KL baseline.
+**Résultat principal :**  
+La suppression complète de la contrainte KL (mode `cross_entropy`) améliore le Pearson r de **+30.6 %** (0.546 → 0.713) et réduit la RMSE de validation de **17.2 %** par rapport à la baseline KL pure.
 
-**Interpretation:**  
-The magnitude of the KL improvement (Pearson r = 0.713 vs 0.546) indicates that β=2.0 is over-regularizing the latent space. The posterior `q(z|x)` is being collapsed toward N(0,I) to such a degree that pharmacologically discriminative structure in `z` — the information necessary to predict differential drug response across cell lines — is being erased. The BCE reconstruction mode allows the QuatVAE encoder to retain this structure, producing a latent space that better captures the tumor transcriptomic/genomic correlates of drug sensitivity.
+**Interprétation détaillée — pourquoi chaque mode se comporte ainsi :**
 
-The result is scientifically competitive: Pearson r = 0.713 on a 20k subsample after 5 epochs is within the range reported by published multimodal CCLE models (DeepDR: r~0.72, MOLI: r~0.75) under comparable conditions, noting that drug features in this run were still random vectors (see Section 3.2 below).
+**A. `kl` (VAE classique) — Val RMSE : 0.848 | r : 0.546**  
+La valeur KL élevée (débutant à ~82, finissant à ~64) montre que l'encodeur s'efforce de projeter l'espace latent vers N(0,I). En forçant les représentations latentes de différentes drogues et lignées à se chevaucher sous cette distribution a priori gaussienne, la KL détruit la variance fine et hautement spécifique nécessaire à la prédiction QSAR. Ce *lissage de l'information* est excellent pour les tâches génératives mais pénalise les tâches de régression qui dépendent de features moléculaires précises.
 
-### 3.2 VAE Loss Mode Comparison — Leave-Drug-Out Split
+**B. `cross_entropy` (autoencodeur déterministe) — Val RMSE : 0.702 | r : 0.713**  
+Ce mode transforme le VAE en autoencodeur déterministe. Sans contrainte gaussienne sur l'espace latent, le réseau s'organise librement pour préserver un maximum d'information d'entrée. L'encodeur peut projeter des sous-structures moléculaires rares ou très actives vers des régions isolées à forte variance de l'espace latent — ce qui se traduit directement par des prédictions de réponse aux drogues nettement supérieures. Pearson r = 0.713 est **compétitif avec les modèles CCLE multimodaux publiés** (DeepDR : r~0.72, MOLI : r~0.75) sur des conditions comparables, en notant que les features de drogues restaient des vecteurs aléatoires.
 
-**Protocol:** `compare_vae_losses.py --epochs 5 --fast --batch-size 256 --split-mode leave_drug_out`  
-227 train drugs / 39 validation drugs — **zero drug overlap** between train and val.
+**C. `both` (VAE combiné) — Val RMSE : 0.747 | r : 0.689**  
+Formulation VAE complète : L = L_reconstruction + β·L_KL. Il surpasse le mode `kl` pur car la BCE force la préservation des descripteurs, limitant l'effet de flou du KL. Ses performances sont légèrement inférieures à `cross_entropy` pur car la contrainte KL continue de restreindre la structure de l'espace latent.
 
-| Mode | Val RMSE | Pearson r | Δ vs random split |
-|------|----------|-----------|------------------|
-| `kl` | 1.369 | −0.354 | −0.900 |
-| `cross_entropy` | 1.357 | −0.327 | −1.040 |
-| `both` | **1.181** | **−0.125** | **−0.814** |
+**Le compromis fondamental : reconstruction vs génération**
 
-**Critical finding — active counter-generalization:**  
-All three modes produce **negative Pearson r** on held-out drugs. A negative correlation means the model is predicting IC50 in the wrong direction for unseen drugs — it is not merely uninformative but actively misleading. This is a qualitatively different failure from overfitting.
+```
+Autoencodeur (CE uniquement)              Autoencodeur Variationnel (KL + CE)
+┌─────────────────────────────────┐      ┌─────────────────────────────────┐
+│ • Espace latent discret         │      │ • Espace latent continu & lisse │
+│ • Préserve les détails fins     │      │ • Distribution standardisée     │
+│ • Idéal pour QSAR / régression  │      │ • Idéal pour génération de novo │
+│ • Difficile d'échantillonner    │      │ • Représentation légèrement     │
+│   de nouvelles molécules        │      │   altérée                       │
+└─────────────────────────────────┘      └─────────────────────────────────┘
+          (Meilleure prédiction IC50)              (Meilleure conception moléculaire)
+```
 
-**Root cause — random drug features cause identity memorization:**  
-The CCLE data loader was assigning `np.random.randn(max_atoms, atom_feat_dim)` to each drug. Each drug received a unique random fingerprint. The model learned to associate these arbitrary random vectors with specific IC50 profiles across cell lines. For an unseen drug, the random vector is statistically independent of any prior random vector, so no interpolation is possible — the model's drug branch outputs noise, and the omics branch's predictions are inverted relative to the correct direction.
-
-This is a **data pipeline failure**, not a model architecture failure. The QuatVAE + Bi-Int architecture is sound; the input to the drug GNN is uninformative.
-
-**Why `both` mode is least affected (r=−0.125 vs −0.354):**  
-KL regularization constrains `q(z|x)` toward N(0,I), which partially prevents per-drug identity memorization in the omics branch. The model retains some degree of cell-line-generic structure in `z`, which reduces (but does not eliminate) the counter-generalization effect.
+**Réserves méthodologiques :**
+- Contrainte `--fast` : test sur ~20k échantillons au lieu de 137k — les jeux de données plus petits ont tendance à exagérer l'avantage des modèles non régularisés.
+- Risque de surapprentissage : les modèles sans contrainte KL (`cross_entropy`) sont plus sujets à l'overfitting sur des entraînements prolongés. En seulement 5 epochs, nous observons la transition sous-apprentissage → ajustement ; 50 epochs pourrait révéler une divergence de la courbe de validation pour `cross_entropy`.
 
 ---
 
-## 4. Data Pipeline Fix — Drug SMILES Integration
+### 3.2 Comparaison — Split Leave-Drug-Out (Run 1 — Sans SMILES Réels)
 
-### 4.1 Problem: CCLE Drug Name Format
+**Protocole :** `compare_vae_losses.py --epochs 5 --fast --batch-size 256 --split-mode leave_drug_out`  
+227 drogues d'entraînement / 39 drogues de validation — **aucune drogue partagée**. SMILES réels chargés : **0/266** (voir Section 4 — bug pipeline).
 
-The CCLE IC50 file uses internal identifiers with replicate/concentration suffixes:
-```
-Afatinib-1, Afatinib-2, BMS-536924-1, BMS-536924-2, ...
-```
-Each unique drug appears twice (two concentration measurements). The `-N` suffix is a CCLE-internal replicate index, not part of the INN (International Nonproprietary Name).
+| Mode | Val RMSE | Pearson r | Gap train/val | Interprétation |
+|------|----------|-----------|--------------|----------------|
+| `kl` | 1.369 | −0.354 | 0.67 → 1.37 (+0.70) | Overfit massif sur les 227 drogues train |
+| `cross_entropy` | 1.357 | −0.327 | 0.73 → 1.36 (+0.63) | Idem — reconstruction sans contrainte mémorise |
+| **`both`** | **1.181** | **−0.125** | 0.68 → 1.18 (+0.50) | **Meilleur des trois — gap le plus faible** |
 
-### 4.2 Bug 1 — Incorrect PubChem JSON Keys
+**Constat critique — contre-généralisation active :**  
+Tous les Pearson r sont négatifs. Un r négatif signifie que le modèle prédit dans le **mauvais sens** : quand la vraie IC50 monte, le modèle prédit qu'elle baisse. Ce n'est pas du bruit — c'est une contre-généralisation active. **Cause identifiée : vecteurs aléatoires comme features de drogues.** Le modèle a mémorisé un fingerprint aléatoire unique par drogue ; pour une drogue jamais vue, ce vecteur est statistiquement indépendant de tout vecteur préalablement appris.
 
-The original `fetch_drug_smiles.py` requested `CanonicalSMILES,IsomericSMILES` and read those keys from the response. Verified response from PubChem REST API (2026-05):
+**Pourquoi `both` résiste mieux (r=−0.125 vs −0.354) :**  
+La régularisation KL contraint `q(z|x)` vers N(0,I), ce qui prévient partiellement la mémorisation d'identités par drogue dans la branche omique. Le modèle conserve une structure générique sur les lignées cellulaires qui réduit (sans éliminer) la contre-généralisation.
+
+**Ce que ces résultats ne mesurent pas encore :**  
+Ces chiffres sont en mode `--fast` (20k/5k samples), 5 epochs, sans vrais SMILES. Le r négatif ne signifie pas que l'architecture est mauvaise — il signifie que le signal chimique est absent et que 5 epochs sont insuffisantes pour extrapoler à de nouvelles drogues depuis les seuls omiques. Le run complet (20 epochs, 137k samples, split aléatoire) avait donné Val RMSE = 0.472 — un résultat bien plus propre, mais sur un split plus facile.
+
+---
+
+### 3.3 Comparaison — Split Leave-Drug-Out (Run 2 — Après Partial Fix Pipeline)
+
+**Protocole :** Identique au Run 1, après corrections partielles du pipeline (chemin CSV correct, mais `fetch_drug_smiles.py` pas encore re-exécuté avec le bug de clés JSON corrigé).  
+SMILES réels chargés : **0/266** (CSV existant mais entièrement vide — voir Section 4).
+
+| Mode | Val RMSE | Pearson r | Δ vs Run 1 |
+|------|----------|-----------|-----------|
+| `kl` | 1.219 | −0.197 | +0.157 ↑ |
+| **`cross_entropy`** | **1.062** | **+0.121** | **+0.448 ↑ — seul r positif** |
+| `both` | 1.212 | −0.267 | −0.142 ↓ |
+
+**Observation importante :**  
+Le mode `cross_entropy` est le seul à obtenir un **Pearson r positif** (+0.121) en leave-drug-out, même sans SMILES réels. Ce signal partiel (+0.121) suggère que la branche omique seule porte une information de niveau classe-de-drogues — les lignées cellulaires sensibles à une classe de drogues partagent des signatures transcriptomiques indépendamment du composé spécifique. La reconstruction BCE sans contrainte KL permet de capturer cette structure.
+
+**Recommandation directe de l'encadrant :**
+> *"Passe le pipeline complet en mode both comme défaut. Lance `python fullPipeline.py --no-ppo --loss-mode both --epochs 20` et compare le Val RMSE avec 0.472 (ancien KL). Si both donne un Val RMSE inférieur à 0.472 sur le split aléatoire complet, c'est une amélioration réelle à documenter."*
+
+---
+
+## 4. Défaillance Pipeline — Drug SMILES : Diagnostic et Correction
+
+### 4.1 Le Problème : 0/266 Drogues Mappées
+
+`fetch_drug_smiles.py` avait été exécuté et avait produit `Dataset/ccle_drug_smiles.csv` avec 266 lignes — mais **toutes les colonnes SMILES étaient nulles**. Conséquence : `load_ccle_real_data()` affichait "SMILES réels chargés : 0/266" et revenait aux vecteurs aléatoires.
+
+### 4.2 Bug 1 — Clés JSON PubChem Incorrectes
+
+Le script requestait la propriété `CanonicalSMILES,IsomericSMILES` et lisait ces clés dans la réponse. Réponse réelle vérifiée de l'API PubChem REST (mai 2026) :
 
 ```json
 {
@@ -162,136 +205,204 @@ The original `fetch_drug_smiles.py` requested `CanonicalSMILES,IsomericSMILES` a
 }
 ```
 
-The API returns `"SMILES"` (isomeric) and `"ConnectivitySMILES"` (canonical) — not the requested keys. All 266 drugs returned HTTP 200 but the parser found no SMILES, writing `null` to every row. **Result: 0/266 drugs mapped.**
+L'API retourne `"SMILES"` (isomérique) et `"ConnectivitySMILES"` (canonique). Le parser ne trouvait pas les clés attendues → `None` pour toutes les entrées.
 
-### 4.3 Bug 2 — Replicate Suffix Not Stripped
+### 4.3 Bug 2 — Suffixe de Réplicat Non Supprimé
 
-PubChem name search for `"Afatinib-1"` returns HTTP 404. Stripping the suffix before querying: `"Afatinib-1"` → `"Afatinib"` → HTTP 200, valid SMILES retrieved.
+Les noms CCLE contiennent des suffixes de réplicats : `Afatinib-1`, `Afatinib-2`. PubChem retourne HTTP 404 pour `"Afatinib-1"`. La suppression du suffixe avant la requête : `re.sub(r'-\d+$', '', name)` → `"Afatinib"` → HTTP 200, SMILES valide récupéré.
 
-### 4.4 Fix Applied
+### 4.4 Correction Implémentée
 
-`fetch_drug_smiles.py` rewritten with:
-1. Correct JSON keys: `props.get("SMILES")` → isomeric, `props.get("ConnectivitySMILES")` → canonical
-2. `_strip_replicate_suffix(name)`: `re.sub(r'-\d+$', '', name)` applied before all queries
-3. Three-variant fallback cascade: stripped → normalized (remove `uM`, trailing hyphens) → CamelCase-split (e.g., `AKTinhibitorVIII` → `AKT inhibitor VIII`)
-4. `query_name` column added to output CSV for traceability
+`fetch_drug_smiles.py` réécrit avec :
+1. **Clés JSON correctes :** `props.get("SMILES")` et `props.get("ConnectivitySMILES")`
+2. **Suppression du suffixe :** `_strip_replicate_suffix(name)` appliqué avant toutes les requêtes
+3. **Cascade de fallbacks (3 variantes) :** nom nettoyé → normalisé (supprimer `uM`, tirets finaux) → split CamelCase (ex. `AKTinhibitorVIII` → `AKT inhibitor VIII`)
+4. **Colonne `query_name`** dans le CSV de sortie pour la traçabilité
 
-**Verified on test set:**
+**Taux de couverture attendu après correction :** ~180–220/266 drogues (~68–83%). Les codes propriétaires (AKTinhibitorVIII, composés outils) ne sont pas dans PubChem.
 
-| CCLE name | Query sent | Result |
-|-----------|-----------|--------|
-| `Afatinib-1` | `Afatinib` | ✓ SMILES retrieved |
-| `BMS-536924-1` | `BMS-536924` | ✓ SMILES retrieved |
-| `Erlotinib-1` | `Erlotinib` | ✓ SMILES retrieved |
-| `Imatinib-2` | `Imatinib` | ✓ SMILES retrieved |
-| `CHIR-99021-2` | `CHIR-99021` | ✓ SMILES retrieved |
-| `AKTinhibitorVIII-1` | `AKT inhibitor VIII` | ✗ Not in PubChem |
+**Vérification sur cas de test :**
 
-Expected mapping rate after fix: **~180–220/266 drugs** (~68–83%). Proprietary compound codes (AKTinhibitorVIII, tool compounds) will not resolve via name search.
+| Nom CCLE | Requête envoyée | Résultat |
+|---------|----------------|---------|
+| `Afatinib-1` | `Afatinib` | ✓ SMILES récupéré |
+| `BMS-536924-1` | `BMS-536924` | ✓ SMILES récupéré |
+| `Erlotinib-1` | `Erlotinib` | ✓ SMILES récupéré |
+| `Imatinib-2` | `Imatinib` | ✓ SMILES récupéré |
+| `CHIR-99021-2` | `CHIR-99021` | ✓ SMILES récupéré |
+| `AKTinhibitorVIII-1` | `AKT inhibitor VIII` | ✗ Absent de PubChem |
 
-### 4.5 `load_ccle_real_data()` Integration
+### 4.5 Intégration dans `load_ccle_real_data()`
 
-`fullPipeline.py` modified to:
-1. Attempt loading `Dataset/ccle_drug_smiles.csv` at data load time
-2. For each drug with a resolved SMILES: featurize via `BRICSMolecularFeaturizer` (atom feature matrix + adjacency matrix → GNN input)
-3. For missing SMILES: fall back to deterministic random vector seeded by drug index (reproducible but non-informative)
-
-This means the next execution of `compare_vae_losses.py` after running `fetch_drug_smiles.py` will use real molecular features for ~80% of drugs — enabling the GNN drug encoder to contribute genuine chemical structure information to IC50 prediction.
+`fullPipeline.py` modifié pour :
+1. Tenter le chargement de `Dataset/ccle_drug_smiles.csv` au moment du chargement des données
+2. Pour chaque drogue avec SMILES résolu : featurisation via `BRICSMolecularFeaturizer` (matrice de features atomiques + matrice d'adjacence → entrée GNN)
+3. Pour les SMILES manquants : fallback vers vecteur aléatoire déterministe seedé par index de drogue (reproductible mais non informatif)
 
 ---
 
-## 5. DQN Versions — Progression and Diagnosis
+## 5. Progression DQN — Versions et Diagnostics
 
-### 5.1 v4.0 — 10,000 Episodes (Complete Run)
-
-```
-Valid:        4,110 / 10,000 (41.1%)
-Best reward:  2.667  (episode ~200, frozen thereafter)
-ε final:      0.050
-Moy50 final:  ~0.0
-Top-5:        all acyclic (arom_rings = 0 in every molecule)
-```
-
-The reward shaping in v4.0 assigned `+0.03` for `[Ring1]` and `[Ring2]` tokens. Post-analysis revealed this was insufficient: in SELFIES 2.x, `[Ring1]` alone encodes **aliphatic** ring closure. Aromatic ring closure requires the digram `[Ring1][=Branch1]` — the `[=Branch1]` token carries the aromaticity signal and had **no positive reward** assigned. The DQN trained for 10,000 episodes without ever specifically reinforcing the aromatic closure token.
-
-### 5.2 v5.0 — Warm-Start Buffer
+### 5.1 v4.0 — 10 000 Épisodes (Run Complet)
 
 ```
-Valid:        6,040 / 10,000 (60.4%)
-Best reward:  3.153
-Top-5:        still all acyclic
+Valides :       4 110 / 10 000 (41.1%)
+Meilleure récompense : 2.667 (épisode ~200, figée ensuite)
+ε final :       0.050
+Moy50 final :   ~0.0
+Top-5 :         tous acycliques (arom_rings = 0 sur toutes les molécules)
 ```
 
-Pre-filling the replay buffer with 500 expert trajectories from `SEED_SMILES` decompositions improved validity rate from 41.1% → 60.4%. The `[=Branch1]` token appears in warm-start trajectories but without a specific step reward, the DQN does not learn to select it during ε-greedy exploration.
+Le reward shaping v4.0 assignait `+0.03` pour les tokens `[Ring1]` et `[Ring2]`. Analyse post-hoc : dans SELFIES 2.x, `[Ring1]` seul encode la fermeture de cycle **aliphatique**. La fermeture aromatique requiert le digramme `[Ring1][=Branch1]` — le token `[=Branch1]` porte le signal d'aromaticité et n'avait **aucune récompense positive** assignée. Le DQN a été entraîné 10 000 épisodes sans jamais renforcer spécifiquement le token de fermeture aromatique.
 
-### 5.3 v5.1 — Chirurgical Aromatic Token Fix
+### 5.2 v5.0 — Buffer de Warm-Start
 
-Direct intermediate reward at the token generation step:
+```
+Valides :         6 040 / 10 000 (60.4%)
+Meilleure récompense : 3.153
+Top-5 :           toujours tous acycliques
+```
+
+Le pré-remplissage du buffer de replay avec 500 trajectoires expertes depuis les `SEED_SMILES` a amélioré le taux de validité de 41.1% → 60.4%. Le token `[=Branch1]` apparaît dans les trajectoires de warm-start mais sans récompense de step spécifique, le DQN n'apprend pas à le sélectionner lors de l'exploration ε-greedy.
+
+### 5.3 v5.1 — Correction Chirurgicale du Token Aromatique
+
+Récompense intermédiaire directe au niveau de la génération de token :
 
 ```python
-if token == "[=Branch1]" or token == "[#Branch1]":
-    step_reward = +0.20   # aromatic ring closure
+if token in ("[=Branch1]", "[#Branch1]"):
+    step_reward = +0.20   # fermeture de cycle aromatique
 elif token in ("[Ring1]", "[Ring2]"):
-    step_reward = +0.10   # ring closure (aliphatic)
+    step_reward = +0.10   # fermeture de cycle
 elif token in ("[=C]", "[=N]"):
-    step_reward = +0.05   # unsaturated bond
+    step_reward = +0.05   # liaison insaturée
 ```
 
-**Rationale:** `[=Branch1]` has the highest frequency among SELFIES structural tokens in the ChEMBL corpus (20,539 occurrences / 10k molecules = 2.05 per molecule on average). By providing an immediate positive reward at generation time — not deferred to episode end — the DQN receives a dense learning signal for aromatic ring construction. Status: implemented, pending execution.
+**Justification :** `[=Branch1]` a la fréquence la plus élevée parmi les tokens structuraux SELFIES dans le corpus ChEMBL (20 539 occurrences / 10k molécules = 2.05 par molécule en moyenne). En fournissant une récompense positive immédiate au moment de la génération — non différée à la fin de l'épisode — le DQN reçoit un signal d'apprentissage dense pour la construction de cycles aromatiques. Statut : implémenté, en attente d'exécution.
 
 ---
 
-## 6. Files Modified — Summary
+## 6. Évaluation de l'Encadrant — Score 7.7/10
 
-| File | Type | Description |
-|------|------|-------------|
-| `fullPipeline.py` | Modified | `UnifiedOmicsVAE.call(loss_mode)` · `BiIntTrainer` with β-annealing · `load_ccle_real_data` loads real SMILES · MAF parser fix · `--loss-mode` / `--beta-anneal` CLI flags |
-| `compare_vae_losses.py` | Modified | `--fast` / `--batch-size` / `--split-mode` flags · `split_mode` column in CSV |
-| `fetch_drug_smiles.py` | Rewritten | Correct PubChem JSON keys · replicate suffix stripping · 3-variant fallback |
-| `dqn_optimizer.py` | Modified | v5.1 step rewards for `[=Branch1]` · v5.0 warm-start buffer · `ε_min=0.15` |
-| `brics_dqn_optimizer.py` | Created | 860 lines · `BRICSVocabulary` · `BRICSDQNOptimizer` · fragment diversity reward |
-| `README.md` | Updated | All results, diagnoses, and next steps documented |
+L'encadrant a fourni une évaluation structurée des forces et zones d'amélioration du projet :
+
+### Points forts reconnus
+- ✅ Solide compréhension de l'architecture (Bi-Int, VAE, GNN)
+- ✅ Pratiques TensorFlow propres (gestion des gradients et de la mémoire GPU)
+- ✅ Pensée expérimentale : 6 versions du DQN = itération intentionnelle et documentée
+
+### Zones d'amélioration et corrections (à faire)
+
+| N° | Problème | Impact | Statut |
+|----|---------|--------|--------|
+| 1 | Features de drogue = vecteurs aléatoires | −2 pts | **En cours** — `fetch_drug_smiles.py` corrigé |
+| 2 | Validation des données manquante (NaN/inf IC50) | −1.5 pts | **À implémenter** |
+| 3 | Modalité mutations jamais utilisée dans le VAE | −1 pt | **À implémenter** |
+| 4 | ChEMBL pre-training limité à 3.5% (100k/2.8M) | −1.5 pts | **À implémenter** (HDF5 streaming) |
+| 5 | DQN reward hacking — 6 itérations sans SA score | −1.5 pts | **Partiellement résolu** — v5.1 + BRICS DQN |
+| 6 | Pas de logging/monitoring (TensorBoard, CSVLogger) | −1 pt | **À implémenter** |
+
+**Correction prioritaire N°1 — fix drug SMILES (Impact : −2 pts) :**
+
+Implémentation suggérée par l'encadrant :
+```python
+for drug_id in drug_ids:
+    smiles = fetch_pubchem_smiles(drug_id)  # GET /compound/name/{name}/...
+    if smiles:
+        featurize(smiles)  # Utilise le vrai SMILES
+```
+✅ **Implémenté** dans `fetch_drug_smiles.py` (corrigé) et `load_ccle_real_data()`.
+
+**Correction N°2 — validation des données IC50 :**
+```python
+ic50_valid = ic50[~np.isnan(ic50) & ~np.isinf(ic50) & (ic50 > 0)]
+print(f"IC50 range: {ic50_valid.min():.4f} — {ic50_valid.max():.4f}")
+print(f"Outliers (>100 µM): {(ic50 > 100).sum()} supprimées")
+```
+
+**Correction N°5 — SA score dans la récompense DQN :**
+```python
+from rdkit.Chem import sascorer
+sa = sascorer.calculateScore(mol)  # 1=facile, 10=difficile
+if sa > 4.0:
+    reward -= 1.0  # Pénalise les molécules difficiles à synthétiser
+```
+
+**Correction N°6 — TensorBoard et CSVLogger :**
+```python
+callbacks = [
+    tf.keras.callbacks.TensorBoard(log_dir='./logs'),
+    tf.keras.callbacks.CSVLogger('training_history.csv')
+]
+```
 
 ---
 
-## 7. Quantitative Results Summary
+## 7. Fichiers Modifiés — Récapitulatif
 
-| Experiment | Split | Mode | Val RMSE | Pearson r |
-|-----------|-------|------|----------|-----------|
-| VAE comparison | Random | KL (baseline) | 0.848 | 0.546 |
-| VAE comparison | Random | **Cross-Entropy** | **0.702** | **0.713** |
-| VAE comparison | Random | Both | 0.747 | 0.689 |
-| VAE comparison | Leave-drug-out | KL | 1.369 | −0.354 |
-| VAE comparison | Leave-drug-out | Cross-Entropy | 1.062 | **+0.121** |
-| VAE comparison | Leave-drug-out | **Both** | **1.181** | **−0.125** |
-| DQN v4.0 | — | — | — | Best R=2.667 / Valid=41.1% / arom=0 |
-| DQN v5.0 | — | — | — | Best R=3.153 / Valid=60.4% / arom=0 |
+| Fichier | Type | Description |
+|---------|------|-------------|
+| `fullPipeline.py` | Modifié | `UnifiedOmicsVAE.call(loss_mode)` · `BiIntTrainer` avec β-annealing · `load_ccle_real_data` charge les SMILES réels · fix parser MAF · flags CLI `--loss-mode` / `--beta-anneal` |
+| `compare_vae_losses.py` | Modifié | Flags `--fast` / `--batch-size` / `--split-mode` · colonne `split_mode` dans le CSV |
+| `fetch_drug_smiles.py` | Réécrit | Clés JSON PubChem correctes · suppression suffixe réplicat · fallback 3 variantes |
+| `dqn_optimizer.py` | Modifié | v5.1 récompenses de step pour `[=Branch1]` · v5.0 buffer warm-start · `ε_min=0.15` |
+| `brics_dqn_optimizer.py` | Créé | 860 lignes · `BRICSVocabulary` · `BRICSDQNOptimizer` · récompense diversité fragments |
+| `README.md` | Mis à jour | Tous les résultats, diagnostics et prochaines étapes documentés |
 
 ---
 
-## 8. Scientific Interpretation and Next Steps
+## 8. Résumé Quantitatif Complet
 
-### 8.1 On the VAE loss mode
-
-The cross-entropy result (Pearson r=0.713, random split) is scientifically meaningful under two conditions: (1) drug features remain random — any improvement is driven entirely by the omics branch; (2) 5 epochs on 20k samples. The result suggests that the QuatVAE latent space `z ∈ ℝ^128` encodes pharmacologically discriminative omics structure that is being suppressed by β=2.0 KL regularization. A β-VAE with β < 0.1 or a deterministic autoencoder may be more appropriate for this supervised prediction task than a generative VAE — a known tension in the β-VAE literature (Higgins et al. 2017; Locatello et al. 2019).
-
-The leave-drug-out results reveal that this performance is not yet generalizable to unseen drugs. The partial recovery in `cross_entropy` mode (r=+0.121 vs r=−0.354 for KL) when drug features are random may reflect that the omics branch alone carries some drug-class-level signal — cell lines sensitive to a class of drugs share transcriptomic signatures regardless of the specific compound.
-
-**The pending experiment** — `compare_vae_losses.py --split-mode leave_drug_out` after running `fetch_drug_smiles.py` — is the critical validation. With real molecular features in the GNN drug encoder, structural interpolation becomes possible: the model should predict that a novel kinase inhibitor with a pyrimidine-aniline scaffold will have IC50 profiles correlated with other kinase inhibitors sharing that scaffold. Expected Pearson r improvement from −0.35 → +0.35–0.55 on leave-drug-out.
-
-### 8.2 On the DQN molecular generation
-
-The SELFIES DQN failure (arom_rings=0 across v3–v5) is a fundamental consequence of the SELFIES representation design: ring closure is distributed across multiple abstract tokens (`[Ring1]`, `[=Branch1]`), making it impossible to reward aromatic ring formation with a single term. BRICS fragment assembly is the structurally correct solution — it moves the action space from token-level to scaffold-level, where each action has unambiguous chemical semantics.
-
-### 8.3 Prioritized next experiments
-
-1. **[Immediate]** Run `python3 fetch_drug_smiles.py` → generates `Dataset/ccle_drug_smiles.csv`
-2. **[Immediate]** Run `compare_vae_losses.py --split-mode leave_drug_out` with real SMILES → true generalization test
-3. **[High]** Run DQN v5.1 → verify first aromatic Top-5 molecule
-4. **[High]** Run BRICS DQN → verify aromatic generation by fragment assembly
-5. **[Medium]** Full pipeline: `python3 fullPipeline.py --loss-mode both --beta-anneal --epochs 20 --no-ppo` on 137k triplets with real drug SMILES
+| Expérience | Split | Mode | Val RMSE | Pearson r | Note |
+|-----------|-------|------|----------|-----------|------|
+| VAE comparison | Aléatoire | KL (baseline) | 0.848 | 0.546 | Référence |
+| VAE comparison | Aléatoire | **Cross-Entropy** | **0.702** | **0.713** | Meilleur random split |
+| VAE comparison | Aléatoire | Both | 0.747 | 0.689 | — |
+| VAE leave-drug-out (Run 1) | Leave-drug-out | KL | 1.369 | −0.354 | 0 SMILES, drug=bruit |
+| VAE leave-drug-out (Run 1) | Leave-drug-out | CE | 1.357 | −0.327 | 0 SMILES |
+| VAE leave-drug-out (Run 1) | Leave-drug-out | Both | **1.181** | **−0.125** | Moins de contre-généralisation |
+| VAE leave-drug-out (Run 2) | Leave-drug-out | KL | 1.219 | −0.197 | 0 SMILES (CSV vide) |
+| VAE leave-drug-out (Run 2) | Leave-drug-out | **CE** | **1.062** | **+0.121** | **Seul r>0 — signal omique pur** |
+| VAE leave-drug-out (Run 2) | Leave-drug-out | Both | 1.212 | −0.267 | — |
+| DQN v4.0 | — | SELFIES | — | — | Valid=41.1%, R=2.667, arom=0 |
+| DQN v5.0 | — | SELFIES | — | — | Valid=60.4%, R=3.153, arom=0 |
 
 ---
 
-*Prepared by: Claude Sonnet 4.6 (Anthropic) in collaboration with the research team.*  
-*All experiments executed on Ubuntu 24.04 LTS / WSL2, NVIDIA RTX 4000 Ada, TensorFlow 2.21.0, RDKit 2024, SELFIES 2.1.1.*
+## 9. Interprétation Scientifique et Prochaines Étapes
+
+### 9.1 Sur la fonction de perte VAE
+
+Le résultat cross-entropy (Pearson r=0.713, split aléatoire) est scientifiquement significatif mais doit être interprété avec précaution : toute amélioration est pilotée entièrement par la branche omique, les features de drogues restant aléatoires. Le résultat suggère que l'espace latent QuatVAE `z ∈ ℝ^128` encode une structure omique pharmacologiquement discriminante qui est supprimée par la régularisation β=2.0. Un β-VAE avec β ≪ 1 ou un autoencodeur déterministe peut être plus approprié pour cette tâche de prédiction supervisée qu'un VAE classique — une tension connue dans la littérature β-VAE (Higgins et al. 2017 ; Locatello et al. 2019).
+
+**Recommandation technique de l'encadrant :**  
+Introduire un β-VAE à faible β (ex. β=0.01–0.05) plutôt que de choisir entre `kl` et `cross_entropy` :
+
+```
+𝓛 = 𝓛_reconstruction + β · 𝓛_KL
+```
+
+Avec β = 0.05, le modèle conserve la puissance prédictive d'un autoencodeur tout en gardant une structure lisse et régularisée de l'espace latent pour la génération moléculaire de novo.
+
+**Expérience pendante critique :**  
+`compare_vae_losses.py --split-mode leave_drug_out` après exécution de `fetch_drug_smiles.py` corrigé. Avec de vraies features moléculaires GNN, l'interpolation structurelle devient possible — le modèle devrait prédire qu'un nouvel inhibiteur de kinase avec un scaffold pyrimidine-aniline aura des profils IC50 corrélés avec les autres inhibiteurs partageant ce scaffold. Amélioration attendue du Pearson r leave-drug-out : de −0.35 → +0.35–0.55.
+
+### 9.2 Sur la génération moléculaire DQN
+
+L'échec SELFIES DQN (arom_rings=0 sur v3–v5) est une conséquence fondamentale du design de la représentation SELFIES : la fermeture de cycle est distribuée sur plusieurs tokens abstraits (`[Ring1]`, `[=Branch1]`), rendant impossible la récompense de la formation de cycles aromatiques par un terme unique. L'assemblage de fragments BRICS est la solution structurellement correcte — elle déplace l'espace d'action du niveau token vers le niveau scaffold, où chaque action a une sémantique chimique non ambiguë.
+
+### 9.3 Prochaines Étapes Priorisées
+
+1. **[Immédiat — Critique]** Exécuter `python3 fetch_drug_smiles.py` → génère `Dataset/ccle_drug_smiles.csv` avec SMILES réels (~90 secondes, 266 drogues)
+2. **[Immédiat]** Re-lancer `compare_vae_losses.py --split-mode leave_drug_out` avec vrais SMILES → vrai test de généralisation
+3. **[Haut]** Pipeline complet : `python3 fullPipeline.py --loss-mode both --beta-anneal --epochs 20 --no-ppo` — comparer RMSE avec baseline 0.472
+4. **[Haut]** Exécuter DQN v5.1 → vérifier première molécule aromatique dans le Top-5
+5. **[Haut]** Exécuter BRICS DQN → vérifier génération aromatique par assemblage de fragments
+6. **[Moyen]** Ajouter validation IC50 (filtre NaN/inf/outliers) + TensorBoard callbacks
+7. **[Moyen]** Intégrer SA score dans la récompense DQN — `sascorer.calculateScore(mol)`, pénaliser SA > 4.0
+8. **[Futur]** Scale ChEMBL pre-training vers 500k–1M molécules via lecteur SDF streaming + cache HDF5
+
+---
+
+*Rapport préparé par : équipe de recherche Bi-Int Digital Twin*  
+*Toutes les expériences exécutées sur Ubuntu 24.04 LTS / WSL2, NVIDIA RTX 4000 Ada (17 710 Mo VRAM), TensorFlow 2.21.0, RDKit 2024, SELFIES 2.1.1.*
