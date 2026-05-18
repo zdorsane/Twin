@@ -1,6 +1,6 @@
 r"""
 ================================================================================
-  DQN Drug Optimizer -- SELFIES v4.0 -- Bi-Int Digital Twin
+  DQN Drug Optimizer -- SELFIES v5.0 -- Bi-Int Digital Twin
 ================================================================================
 
 Historique des versions :
@@ -46,9 +46,30 @@ Historique des versions :
     - Best SMILES trouve ep 1-50 et fige -> agent n explore pas, il garde le 1er coup de chance
   v4.0 : Refonte structurelle — F retire, reward shaping, 10k episodes
     - F retire du vocab ET du rejet post-decode (forbidden={9,17,35,53})
-    - Reward shaping : +0.05 par token aromatique [=C]/[=N] durant l episode
+    - Reward shaping : +0.03 par token aromatique [=C]/[=N] durant l episode
     - n_episodes 2000 -> 10000, eps_decay_steps 8000 -> 20000
     - max_selfies_len 30 -> 20 (molecules plus courtes = plus facile a apprendre)
+    - RESULTAT : Moy50 jamais positif (plateau -0.42), best SMILES fige ep.200
+    - CAUSE : eps_min=0.05 trop bas (exploration stoppe trop tot), reward shaping
+      +0.03 trop faible vs bruit -0.5 (nonarom), buffer rempli d exemples negatifs
+  v5.0 : Warm-start expert + exploration persistante + reward shaping fort
+    - Warm-start : pre-remplissage replay buffer avec 500 trajectoires
+      extraites des SEED_SMILES (molecules drug-like connues encodees token-par-token)
+      -> buffer contient des exemples positifs (R > 0) des le debut
+    - eps_min 0.05 -> 0.15 (garder exploration residuelle tout au long)
+    - Reward shaping : +0.15 par token [Ring1]/[Ring2] (cycle = signal fort),
+      +0.05 par token [=C]/[=N] (aromaticite) — 3x plus que v4.0
+    - nonarom_penalty -0.5 -> -1.0 (penalite plus claire sans etre bloquante)
+    - RESULTAT : Valid%=60.4%, Moy50 jamais positif, best=3.153 (acyclique, arom=0)
+    - CAUSE : reward shaping rate le token cle de fermeture aromatique :
+      SELFIES encode les cycles arom avec [Ring1][=Branch1] (pas [Ring1] seul)
+      [=Branch1] (20k occurrences) est le discriminant aromatique, absent du shaping
+      -> agent apprend [Ring1] seul = cycles aliphatiques (thianes, dioxolanes)
+  v5.1 : Fix chirurgical reward shaping — cibler [=Branch1]/[#Branch1]
+    - Reward shaping : +0.20 par token [=Branch1] (fermeture aromatique),
+      +0.10 par token [Ring1] (ouverture cycle), +0.05 par [=C]/[=N]
+    - Blacklist etendue : [P] retire (phosphore non-drug-like dans ce contexte)
+    - nonarom_penalty maintenu a -1.0
 
 References :
   Krenn et al., "SELFIES", Mach. Learn.: Sci. Technol. 2020.
@@ -201,11 +222,11 @@ DQN_HP = dict(
     gamma              = 0.99,
     lr                 = 3e-4,
     eps_start          = 1.0,
-    eps_end            = 0.05,
-    eps_decay_steps    = 20_000,   # v4.0: exploration plus longue
+    eps_end            = 0.15,     # v5.0: exploration residuelle persistante
+    eps_decay_steps    = 15_000,   # v5.0: decay plus rapide (warm-start compense)
     target_update_freq = 200,
-    max_selfies_len    = 20,       # v4.0: molecules courtes = plus facile a apprendre
-    n_episodes         = 10_000,   # v4.0: 5x plus d'episodes pour converger
+    max_selfies_len    = 20,
+    n_episodes         = 5_000,    # v5.0: warm-start rend 5k suffisant
     hidden_dim         = 256,
     target_ic50        = -1.5,
     # ── Récompenses positives (v3.7)
@@ -232,9 +253,11 @@ DQN_HP = dict(
     max_halogens          = 1,    # v3.9: 1 halogène toléré (F médicinal courant)
     alkyne_penalty_coef   = 0.5,
     max_alkynes           = 0,
-    # ── Pénalité v3.9 : pas de cycle aromatique (douce — signal pas bloquant)
-    nonarom_penalty       = -0.5,  # v3.9: retour valeur saine
+    # ── Pénalité v5.0 : pas de cycle aromatique (plus nette — orienter vers arom)
+    nonarom_penalty       = -1.0,  # v5.0: signal plus clair
     log_interval          = 50,
+    # ── Warm-start v5.0
+    warmstart_episodes    = 500,   # nb trajectoires expert pre-injectees dans le buffer
 )
 
 
@@ -379,9 +402,18 @@ class SELFIESEnv:
         if done:
             reward = self._compute_reward()
         else:
-            # v4.0 reward shaping : petit signal positif par token aromatique
+            # v5.1 reward shaping : cibler les tokens de fermeture aromatique SELFIES
+            # SELFIES encode les cycles arom comme [C][=C]...[Ring1][=Branch1]
+            # [=Branch1] = discriminant des aromatiques (20k vs 36k Ring1 dans corpus)
             tok = self.vocab.idx2tok[action] if action < self.vocab.vocab_size else ""
-            reward = 0.03 if tok in ("[=C]", "[=N]", "[Ring1]", "[Ring2]") else 0.0
+            if tok in ("[=Branch1]", "[#Branch1]"):
+                reward = 0.20      # fermeture aromatique — signal le plus fort
+            elif tok in ("[Ring1]", "[Ring2]"):
+                reward = 0.10      # ouverture/fermeture cycle
+            elif tok in ("[=C]", "[=N]"):
+                reward = 0.05      # double liaison carbone/azote
+            else:
+                reward = 0.0
         return self._state(action), reward, done
 
     def _compute_reward(self) -> float:
@@ -554,7 +586,44 @@ class DQNDrugOptimizer:
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN-SELFIES v4.0] state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"[DQN-SELFIES v5.0] state_dim={state_dim} | vocab_size={vocab_size}")
+
+    def _warmstart_buffer(self, z: tf.Tensor, seed_smiles: List[str]):
+        """
+        v5.0 — Pré-remplit le replay buffer avec des trajectoires expert.
+        Pour chaque SMILES drug-like seed, encode en SELFIES token-par-token,
+        calcule la récompense réelle à la fin, et injecte toutes les transitions.
+        """
+        n_ws = self.hp.get("warmstart_episodes", 500)
+        smiles_pool = [s for s in seed_smiles if Chem.MolFromSmiles(s) is not None]
+        if not smiles_pool:
+            return
+        injected = 0
+        for _ in range(n_ws):
+            smi = random.choice(smiles_pool)
+            try:
+                sel = sf.encoder(smi)
+                if not sel:
+                    continue
+                token_ids = self.vocab.encode(sel)
+            except Exception:
+                continue
+
+            env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
+                               hp=self.hp, past_fps=self.past_fps)
+            state = env.reset()
+            for i, action in enumerate(token_ids):
+                action = min(action, self.vocab.vocab_size - 1)
+                next_state, reward, done = env.step(action)
+                self.replay.push(state, action, np.float32(reward),
+                                 next_state, np.float32(done))
+                state = next_state
+                if done:
+                    break
+            injected += 1
+
+        print(f"[DQN v5.0] Warm-start: {injected} trajectoires expert injectees "
+              f"({len(self.replay)} transitions dans le buffer)")
 
     def _sync_target(self):
         self.q_target.set_weights(self.q_online.get_weights())
@@ -601,14 +670,20 @@ class DQNDrugOptimizer:
             tf.constant(np.array( [t.done       for t in b], dtype=np.float32)),
         )
 
-    def optimize(self, gex, mut, cnv, n_episodes: int = None) -> dict:
+    def optimize(self, gex, mut, cnv, n_episodes: int = None,
+                 seed_smiles: List[str] = None) -> dict:
         n_episodes = n_episodes or self.hp["n_episodes"]
         z, _, _    = self.twin.omics_vae((gex, mut, cnv), training=False)
 
+        # v5.0 — warm-start : injecter des trajectoires expert avant l'entraînement
+        if seed_smiles:
+            self._warmstart_buffer(z, seed_smiles)
+
         rewards_hist, valid_count, top_mols = [], 0, []
 
-        print(f"\n[DQN v4.0] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
+        print(f"\n[DQN v5.0] {n_episodes} épisodes | vocab={self.vocab.vocab_size} tokens")
         print(f"  ε: {self.hp['eps_start']} → {self.hp['eps_end']} / {self.hp['eps_decay_steps']} steps")
+        print(f"  Warm-start: {self.hp.get('warmstart_episodes', 0)} trajectoires expert")
         print(f"  Penalites : taille(>{self.hp['max_heavy_atoms']}) | "
               f"repetition(>{self.hp['max_token_repeat']}x, -{self.hp['repeat_penalty_coef']}/exc) | "
               f"stereo(>{self.hp['max_stereo_centers']}) | "
@@ -665,7 +740,7 @@ class DQNDrugOptimizer:
                       f"Valid={100*valid_count/ep:.1f}% | Loss={mean_l:.4f} | "
                       f"Best: {self.best_smiles[:40]!s:40s} ({self.best_reward:.3f})")
 
-        print(f"\n[DQN v4.0] Terminé.")
+        print(f"\n[DQN v5.0] Terminé.")
         print(f"  Meilleur SMILES  : {self.best_smiles}")
         print(f"  Meilleure reward : {self.best_reward:.4f}")
         print(f"  Valides          : {valid_count}/{n_episodes} ({100*valid_count/n_episodes:.1f}%)")
@@ -691,7 +766,7 @@ class DQNDrugOptimizer:
 # ─── Point d'entrée ───────────────────────────────────────────────────────────
 if __name__ == "__main__":
     print("=" * 70)
-    print("  DQN Drug Optimizer v4.0 — SELFIES + ChEMBL 10k corpus")
+    print("  DQN Drug Optimizer v5.1 — SELFIES + ChEMBL 10k corpus + Warm-start")
     print("=" * 70)
 
     # 1. Charger corpus ChEMBL
@@ -713,9 +788,9 @@ if __name__ == "__main__":
     mut = tf.cast(tf.random.uniform([1, HP["mut_dim"]], 0, 2, dtype=tf.int32), tf.float32)
     cnv = tf.random.normal([1, HP["cnv_dim"]])
 
-    # 5. Optimisation
+    # 5. Optimisation avec warm-start sur SEED_SMILES drug-like
     agent  = DQNDrugOptimizer(dt_model, featurizer, vocab, DQN_HP)
-    result = agent.optimize(gex, mut, cnv)
+    result = agent.optimize(gex, mut, cnv, seed_smiles=SEED_SMILES)
 
     print(f"\n{'='*70}")
     print(f"  RÉSULTAT FINAL")
@@ -725,4 +800,4 @@ if __name__ == "__main__":
     print(f"  Valides         : {result['valid_count']}/{DQN_HP['n_episodes']} "
           f"({100*result['valid_count']/DQN_HP['n_episodes']:.1f}%)")
 
-    agent.save_weights("dqn_weights_v4.0")
+    agent.save_weights("dqn_weights_v5.1")

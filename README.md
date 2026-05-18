@@ -848,6 +848,46 @@ ps aux | grep python | grep -v grep
 
 ---
 
+## Reviewer Feedback — Implementations (2026-05-18)
+
+Based on expert reviewer feedback on the session report:
+
+### BRICS Tokenization for DQN (`brics_dqn_optimizer.py`)
+
+**Motivation:** SELFIES DQN (v3–v5) consistently generated acyclic molecules despite 93.5% of the ChEMBL corpus being aromatic. Root cause: the aromatic closure token `[=Branch1]` has no chemical meaning the DQN can learn from reward alone. BRICS fragments replace atom-by-atom generation with scaffold assembly — each action is a complete medicinal chemistry fragment (`[*:1]c1ccccc1`, `[*:1]N1CCNCC1`), guaranteeing aromatic content and retrosynthetic accessibility.
+
+**Key differences vs SELFIES DQN:**
+- Vocabulary: 50–150 BRICS fragments (freq ≥ 5 in ChEMBL 10k) vs 50 SELFIES tokens
+- Episode length: 8 fragments max vs 20 tokens
+- Additional reward: `brics_success_bonus=+0.3` when `BRICSBuild` succeeds, `fragment_diversity=+0.2×(unique/total)`
+
+**Status:** Implemented — not yet executed. Run with:
+```bash
+python3 brics_dqn_optimizer.py > logs_brics_dqn.txt 2>&1
+```
+
+### Cross-Entropy VAE Loss (`--loss-mode` flag in `fullPipeline.py`)
+
+**Motivation:** Binary cross-entropy reconstruction is more appropriate than implicit MSE for omics data, particularly for sparse mutation features (mostly binary 0/1). BCE penalizes systematic reconstruction errors proportionally to feature sparsity, potentially improving the information content of the latent space `z`.
+
+**Three modes available:**
+
+| Mode | Command | Description |
+|------|---------|-------------|
+| `kl` | `python3 fullPipeline.py` | **Default — original behaviour unchanged** |
+| `cross_entropy` | `python3 fullPipeline.py --loss-mode cross_entropy` | BCE reconstruction, no KL |
+| `both` | `python3 fullPipeline.py --loss-mode both` | KL + BCE combined |
+
+**Comparison script:** `compare_vae_losses.py` — runs all 3 modes × N epochs, saves `Dataset/vae_loss_comparison.csv`.
+
+```bash
+python3 compare_vae_losses.py --epochs 10
+```
+
+**Status:** Implemented — backward compatible (`loss_mode='kl'` default).
+
+---
+
 ## Notebooks
 
 | Notebook | Description |

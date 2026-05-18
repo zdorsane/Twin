@@ -271,11 +271,43 @@ class UnifiedOmicsVAE(Model):
     def decode(self, z, training=False):
         return self.decoder(z, training=training)
 
-    def call(self, inputs, training=False):
+    def call(self, inputs, training=False, loss_mode='kl'):
+        """
+        loss_mode : 'kl'            — original KL divergence (default, backward-compatible)
+                    'cross_entropy' — binary CE reconstruction loss, no KL regularization
+                    'both'          — KL + binary CE reconstruction (full VAE with CE)
+        """
         gex, mut, cnv = inputs
         mu, log_var   = self.encode(gex, mut, cnv, training)
         z             = self.reparameterize(mu, log_var)
         recon         = self.decode(z, training)
+
+        if loss_mode in ('cross_entropy', 'both'):
+            # Binary cross-entropy reconstruction loss.
+            # Omics features span multiple scales (z-score for GEx, binary for Mut,
+            # z-score for CNV) — we min-max normalise the concatenated target to [0,1]
+            # so that binary CE is well-defined.
+            x_target = tf.concat([gex, mut, cnv], axis=-1)
+            x_min = tf.reduce_min(x_target, axis=-1, keepdims=True)
+            x_max = tf.reduce_max(x_target, axis=-1, keepdims=True)
+            x_norm = tf.clip_by_value(
+                (x_target - x_min) / (x_max - x_min + 1e-8), 0.0, 1.0)
+            # Decoder output is sigmoid-activated when CE mode is used
+            recon_sig = tf.sigmoid(recon)
+            recon_loss = tf.reduce_mean(
+                keras.losses.binary_crossentropy(x_norm, recon_sig))
+
+            if loss_mode == 'cross_entropy':
+                return z, recon, recon_loss
+
+            # 'both': KL + CE
+            kl_per_dim = -0.5 * (1 + log_var - tf.square(mu) - tf.exp(log_var))
+            if HP['vae_free_bits'] > 0.0:
+                kl_per_dim = tf.maximum(kl_per_dim, HP['vae_free_bits'])
+            kl_loss = tf.reduce_mean(tf.reduce_sum(kl_per_dim, axis=-1))
+            return z, recon, kl_loss + recon_loss
+
+        # 'kl' — original behaviour, strictly unchanged
         kl_per_dim = -0.5 * (1 + log_var - tf.square(mu) - tf.exp(log_var))
         if HP['vae_free_bits'] > 0.0:
             kl_per_dim = tf.maximum(kl_per_dim, HP['vae_free_bits'])
@@ -556,7 +588,7 @@ class BiIntDigitalTwin(Model):
         self.fusion_proj = layers.Dense(dm, activation='gelu')
         self.ic50_head   = IC50PredictorHead()
 
-    def call(self, inputs, training=False):
+    def call(self, inputs, training=False, loss_mode='kl'):
         drug_atoms, adj_mask, gex, mut, cnv = inputs
 
         # ── Drug: GNN → node embeddings [B, N_atoms, drug_node_dim]
@@ -564,7 +596,8 @@ class BiIntDigitalTwin(Model):
         D = self.drug_proj(D_nodes)   # [B, N_atoms, dm]
 
         # ── Omics: VAE → latent [B, latent_dim]
-        z, _, kl_loss = self.omics_vae((gex, mut, cnv), training=training)
+        z, _, kl_loss = self.omics_vae(
+            (gex, mut, cnv), training=training, loss_mode=loss_mode)
         # Expand latent to sequence: [B, latent_dim] → [B, n_heads, dm/n_heads] → [B, n_heads, dm]
         O = tf.reshape(
             self.omics_seq_expand(z),
@@ -590,35 +623,42 @@ class BiIntDigitalTwin(Model):
 # ─── 7. TRAINING LOOP WITH COMBINED LOSSES ───────────────────────────────────
 
 class BiIntTrainer:
-    def __init__(self, model: BiIntDigitalTwin, hp=HP):
-        self.model = model
-        self.hp    = hp
-        self.opt   = keras.optimizers.AdamW(hp['learning_rate'])
-        self.mse   = keras.losses.MeanSquaredError()
+    def __init__(self, model: BiIntDigitalTwin, hp=HP, loss_mode: str = 'kl'):
+        """
+        loss_mode : 'kl'            — original KL divergence loss (default)
+                    'cross_entropy' — binary CE reconstruction, no KL
+                    'both'          — KL + binary CE
+        Passing loss_mode='kl' (or omitting it) preserves the original behaviour exactly.
+        """
+        self.model     = model
+        self.hp        = hp
+        self.loss_mode = loss_mode
+        self.opt       = keras.optimizers.AdamW(hp['learning_rate'])
+        self.mse       = keras.losses.MeanSquaredError()
 
-    @tf.function
     def train_step(self, batch):
         drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
         with tf.GradientTape() as tape:
-            ic50_pred, kl_loss = self.model(
-                (drug_atoms, adj_mask, gex, mut, cnv), training=True)
+            ic50_pred, vae_loss = self.model(
+                (drug_atoms, adj_mask, gex, mut, cnv),
+                training=True, loss_mode=self.loss_mode)
             regression_loss = self.mse(ic50_true, ic50_pred)
             beta = self.hp['vae_beta']
-            total_loss = regression_loss + beta * kl_loss
+            total_loss = regression_loss + beta * vae_loss
         grads = tape.gradient(total_loss, self.model.trainable_variables)
         self.opt.apply_gradients(zip(grads, self.model.trainable_variables))
         rmse = tf.sqrt(regression_loss)
         return {'total_loss': total_loss, 'regression_loss': regression_loss,
-                'kl_loss': kl_loss, 'rmse': rmse}
+                'kl_loss': vae_loss, 'rmse': rmse}
 
-    @tf.function
     def val_step(self, batch):
         drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
-        ic50_pred, kl_loss = self.model(
-            (drug_atoms, adj_mask, gex, mut, cnv), training=False)
+        ic50_pred, vae_loss = self.model(
+            (drug_atoms, adj_mask, gex, mut, cnv),
+            training=False, loss_mode=self.loss_mode)
         regression_loss = self.mse(ic50_true, ic50_pred)
         rmse = tf.sqrt(regression_loss)
-        return {'val_loss': regression_loss + self.hp['vae_beta']*kl_loss,
+        return {'val_loss': regression_loss + self.hp['vae_beta'] * vae_loss,
                 'val_rmse': rmse}
 
     def fit(self, train_ds, val_ds, epochs=50):
@@ -635,12 +675,13 @@ class BiIntTrainer:
             y_true_all, y_pred_all = [], []
             for batch in val_ds:
                 drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
-                ic50_pred, kl_loss = self.model(
-                    (drug_atoms, adj_mask, gex, mut, cnv), training=False)
+                ic50_pred, vae_loss = self.model(
+                    (drug_atoms, adj_mask, gex, mut, cnv),
+                    training=False, loss_mode=self.loss_mode)
                 regression_loss = self.mse(ic50_true, ic50_pred)
                 rmse = tf.sqrt(regression_loss)
                 val_metrics.setdefault('val_loss', []).append(
-                    (regression_loss + self.hp['vae_beta'] * kl_loss).numpy())
+                    (regression_loss + self.hp['vae_beta'] * vae_loss).numpy())
                 val_metrics.setdefault('val_rmse', []).append(rmse.numpy())
                 y_true_all.extend(ic50_true.numpy().tolist())
                 y_pred_all.extend(ic50_pred.numpy().ravel().tolist())
@@ -657,9 +698,10 @@ class BiIntTrainer:
             history['pearson_r'].append(float(pr))
 
             if epoch % 5 == 0 or epoch == 1:
+                loss_label = self.loss_mode.upper()
                 print(f"Epoch {epoch:3d} | Train RMSE: {t_rmse:.4f} | "
                       f"Val RMSE: {v_rmse:.4f} | Pearson r: {pr:.4f} | "
-                      f"KL: {np.mean(train_metrics['kl_loss']):.4f}")
+                      f"{loss_label}: {np.mean(train_metrics['kl_loss']):.4f}")
         return history
 
 
@@ -1594,7 +1636,8 @@ def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_d
     return False
 
 
-def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None):
+def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
+                 loss_mode='kl'):
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
@@ -1632,7 +1675,7 @@ def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None)
         print(f"\n[Data] Données CCLE réelles chargées ({n_real:,} triplets).")
 
     print("\n[Training] Bi-Int Digital Twin on IC50 prediction (QSAR)...")
-    trainer = BiIntTrainer(model, HP)
+    trainer = BiIntTrainer(model, HP, loss_mode=loss_mode)
     history = trainer.fit(train_ds, val_ds, epochs=epochs)
 
     final_stats = None
@@ -1736,12 +1779,16 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=20, help='Number of IC50 training epochs')
     parser.add_argument('--rl-episodes', type=int, default=HP['rl_episodes'], help='Number of PPO episodes for RL drug generation')
     parser.add_argument('--no-ppo', action='store_true', help='Skip PPO/RL drug generation, only train IC50 model')
+    parser.add_argument('--loss-mode', choices=['kl', 'cross_entropy', 'both'],
+                        default='kl',
+                        help='VAE loss mode: kl (original) | cross_entropy | both (KL+CE)')
     args = parser.parse_args()
 
     if args.mode == 'baseline':
-        run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False)
+        run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False,
+                     loss_mode=args.loss_mode)
     elif args.mode == 'compare':
         compare_pretraining(epochs=args.epochs)
     else:
         run_pipeline(use_pretrained=True, epochs=args.epochs, rl_episodes=args.rl_episodes,
-                     run_ppo=not args.no_ppo)
+                     run_ppo=not args.no_ppo, loss_mode=args.loss_mode)
