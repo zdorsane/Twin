@@ -1494,13 +1494,16 @@ def load_ccle_real_data(
     print(f"  IC50 : {len(drug_ids)} drogues × {len(cell_lines)} lignées")
 
     # ── GEx : lignes = gènes, colonnes = lignées
-    gex_df = pd.read_csv(gex_path, sep='\t', index_col=0)
-    gex_df = gex_df.apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    # Read directly as float32 to avoid the default float64 DataFrame (saves ~8 GB RAM).
+    # apply(pd.to_numeric) on a 17k-gene × 1k-cell matrix in float64 allocates ~17 GB;
+    # reading with dtype avoids that entirely.
+    print("  Chargement GEx (504 MB → float32)...")
+    gex_df = pd.read_csv(gex_path, sep='\t', index_col=0, dtype=np.float32).fillna(0.0)
     common_cells_gex = [c for c in cell_lines if c in gex_df.columns]
 
     # ── CNA : lignes = gènes, colonnes = lignées
-    cna_df = pd.read_csv(cna_path, sep='\t', index_col=0)
-    cna_df = cna_df.apply(pd.to_numeric, errors='coerce').fillna(0.0)
+    print("  Chargement CNA...")
+    cna_df = pd.read_csv(cna_path, sep='\t', index_col=0, dtype=np.float32).fillna(0.0)
     common_cells_cna = [c for c in cell_lines if c in cna_df.columns]
 
     # sorted() ensures a deterministic row order across runs (set intersection is unordered)
@@ -1517,14 +1520,16 @@ def load_ccle_real_data(
     gex_mat = gex_sub[top_genes].values[:, :gex_dim].astype(np.float32)
     gex_mean, gex_std = gex_mat.mean(axis=0), gex_mat.std(axis=0) + 1e-6
     gex_mat = (gex_mat - gex_mean) / gex_std
-    print(f"  GEx shape : {gex_mat.shape}")  # doit être (cells, 978)
+    print(f"  GEx shape : {gex_mat.shape}")  # (cells, 978)
+    del gex_df, gex_sub  # free ~4–8 GB before CNA/mutations
 
     # ── CNA : top gènes par variance → cnv_dim exactement
     cna_sub = cna_df[common_cells].T
     cna_var = cna_sub.var(axis=0)
     top_cna_genes = cna_var.sort_values(ascending=False).index[:cnv_dim].tolist()
     cna_mat = cna_sub[top_cna_genes].values[:, :cnv_dim].astype(np.float32)
-    print(f"  CNA shape : {cna_mat.shape}")  # doit être (cells, 426)
+    print(f"  CNA shape : {cna_mat.shape}")  # (cells, 426)
+    del cna_df, cna_sub  # free CNA DataFrame
 
     # ── Mutations : binarisées sur mut_dim gènes les plus mutés
     # Row ordering follows common_cells exactly (same sorted list as GEx/CNA).
@@ -1631,55 +1636,57 @@ def load_ccle_real_data(
         print(f"  Drogues exclues (pas de SMILES) : {n_skipped} → "
               f"{skipped_names[:5]}{'...' if n_skipped>5 else ''}")
 
-    # ── IC50 validation (Priority 3): scan raw IC50 values before transform
-    raw_ic50_vals = []
-    for drug_id in drug_ids:
-        for cell in common_cells:
-            v = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
-            raw_ic50_vals.append(v)
-    raw_ic50_vals = np.array(raw_ic50_vals, dtype=np.float64)
+    # ── Convert IC50 to numpy once — eliminates 260k+ per-cell .loc[] calls
+    # reindex to common_cells columns; missing columns become NaN
+    ic50_np = ic50_df.reindex(columns=common_cells).values.astype(np.float32)
+    drug_row = {d: i for i, d in enumerate(drug_ids)}
+    del ic50_df  # free pandas DataFrame
 
-    n_total_entries = len(raw_ic50_vals)
-    n_nan    = int(np.isnan(raw_ic50_vals).sum())
-    n_inf    = int(np.isinf(raw_ic50_vals).sum())
-    raw_valid = raw_ic50_vals[~np.isnan(raw_ic50_vals) & ~np.isinf(raw_ic50_vals) & (raw_ic50_vals > 0)]
-    n_nonpos = int(n_total_entries - n_nan - n_inf - len(raw_valid))
+    # ── IC50 validation (Priority 3): vectorised scan
+    flat = ic50_np.ravel()
+    n_total_entries = flat.size
+    n_nan    = int(np.isnan(flat).sum())
+    n_inf    = int(np.isinf(flat).sum())
+    raw_valid = flat[np.isfinite(flat) & (flat > 0)]
+    n_nonpos  = int(n_total_entries - n_nan - n_inf - len(raw_valid))
     n_outlier = int((raw_valid > 100).sum())
+    del flat
 
     print(f"\n  ── IC50 Validation (Priority 3) ──────────────────────────────")
-    print(f"  Raw IC50 entries    : {n_total_entries:,}  (drugs × cell lines)")
+    print(f"  Raw IC50 entries    : {n_total_entries:,}  (drugs × common cell lines)")
     print(f"  Valid (>0, finite)  : {len(raw_valid):,}")
     print(f"  Removed NaN/inf     : {n_nan + n_inf:,}  ({100*(n_nan+n_inf)/n_total_entries:.1f}%)")
     print(f"  Non-positive (<=0)  : {n_nonpos:,}  (clamped to 0.001 µM before log1p)")
     print(f"  Outliers >100 µM    : {n_outlier:,}  ({100*n_outlier/max(len(raw_valid),1):.1f}%)"
           f"  — kept (high IC50 = resistant, biologically meaningful)")
-    print(f"  IC50 range          : {raw_valid.min():.4f} — {raw_valid.max():.1f} µM")
-    print(f"  Percentiles [1,50,99]: {np.percentile(raw_valid,[1,50,99]).round(3)}")
+    if len(raw_valid):
+        print(f"  IC50 range          : {raw_valid.min():.4f} — {raw_valid.max():.1f} µM")
+        print(f"  Percentiles [1,50,99]: {np.percentile(raw_valid,[1,50,99]).round(3)}")
     print(f"  ─────────────────────────────────────────────────────────────")
 
     # ── Construire les triplets (drug, cell_line, ic50)
+    # Per-drug: vectorised valid-cell lookup via numpy instead of .loc[] per cell
     samples_atoms, samples_adj, samples_gex, samples_mut, samples_cna, samples_ic50 = \
         [], [], [], [], [], []
 
-    cell_to_idx = {c: i for i, c in enumerate(common_cells)}
-
     for drug_id in drug_ids:
-        # Skip drugs with no valid SMILES — random vectors carry no chemical signal
         if drug_atom_feats[drug_id] is None:
             continue
-        for ci, cell in enumerate(common_cells):
-            ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
-            if np.isnan(ic50_val) or np.isinf(ic50_val):
-                continue
-            # log1p transform: compresses extreme outliers (max 400k µM → log1p ≈ 12.9)
-            # clamp to 0.001 to avoid log(0); negatives are absent in CCLE but guarded
-            ic50_log = np.log1p(max(float(ic50_val), 0.001))
-            samples_atoms.append(drug_atom_feats[drug_id])
-            samples_adj.append(drug_adj_feats[drug_id])
+        row = ic50_np[drug_row[drug_id]]                       # (n_common_cells,) float32
+        valid_ci = np.where(np.isfinite(row) & (row > 0))[0]  # valid cell indices
+        if valid_ci.size == 0:
+            continue
+        log_vals = np.log1p(np.maximum(row[valid_ci], 0.001))  # vectorised log1p
+
+        atoms = drug_atom_feats[drug_id]
+        adj   = drug_adj_feats[drug_id]
+        for k, ci in enumerate(valid_ci):
+            samples_atoms.append(atoms)
+            samples_adj.append(adj)
             samples_gex.append(gex_mat[ci])
             samples_mut.append(mut_mat[ci])
             samples_cna.append(cna_mat[ci])
-            samples_ic50.append(ic50_log)
+            samples_ic50.append(float(log_vals[k]))
 
     n = len(samples_ic50)
     print(f"  Triplets (drogue, lignée, IC50) valides : {n:,}")
