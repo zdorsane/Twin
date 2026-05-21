@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wsl -d Ubuntu -- bash -c \"ls /home/crbt/miniconda3/envs/TwinCell/bin/python* 2>/dev/null | head -5\")"
+    ]
+  }
+}
