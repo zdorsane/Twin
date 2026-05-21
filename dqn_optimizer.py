@@ -126,6 +126,42 @@ except ImportError:
     HAS_RDKIT = False
     print("[WARN] RDKit non disponible.")
 
+# SA score — shipped with RDKit but not importable as rdkit.Contrib on all installs;
+# locate the .py file via the RDKit share directory.
+_sascorer = None
+try:
+    import rdkit as _rdkit_mod
+
+    def _find_sascorer() -> str | None:
+        """Return the SA_Score directory path, or None if not found."""
+        rdkit_pkg = os.path.dirname(_rdkit_mod.__file__)   # .../site-packages/rdkit
+        # Walk up from site-packages/rdkit to the environment root, then into share/
+        # site-packages/rdkit → site-packages → python3.x → lib → env_root
+        env_root = os.path.normpath(
+            os.path.join(rdkit_pkg, "..", "..", "..", ".."))
+        candidates = [
+            os.path.join(env_root, "share", "RDKit", "Contrib", "SA_Score"),
+            os.path.join(os.environ.get("CONDA_PREFIX", ""),
+                         "share", "RDKit", "Contrib", "SA_Score"),
+            # standard system-wide RDKit location
+            "/usr/share/RDKit/Contrib/SA_Score",
+        ]
+        for p in candidates:
+            if os.path.isfile(os.path.join(p, "sascorer.py")):
+                return p
+        return None
+
+    _sa_dir = _find_sascorer()
+    if _sa_dir:
+        sys.path.insert(0, _sa_dir)
+        import sascorer as _sascorer   # type: ignore
+        sys.path.pop(0)
+        print(f"[SA] sascorer loaded from {_sa_dir}")
+    else:
+        print("[WARN] sascorer.py not found — SA penalty disabled.")
+except Exception as _sa_err:
+    print(f"[WARN] SA score import failed: {_sa_err}")
+
 
 # ─── Extraction SMILES depuis ChEMBL SDF ─────────────────────────────────────
 CHEMBL_SDF_PATH = "/home/crbt/Twin/Dataset/chembl_36.sdf"
@@ -215,6 +251,40 @@ SEED_SMILES = [
 ]
 
 
+# ─── CCLE reference fingerprints (Tanimoto diversity baseline) ───────────────
+
+def load_ccle_reference_fps(
+    csv_path: str = "/home/crbt/Twin/Dataset/ccle_drug_smiles.csv",
+    radius: int = 2,
+    n_bits: int = 1024,
+) -> List:
+    """
+    Build Morgan fingerprints for all CCLE drugs with known SMILES.
+
+    These serve as the diversity reference set in the DQN reward: a generated
+    molecule that is highly similar to an existing CCLE drug scores lower on
+    diversity, pushing the agent toward genuinely novel scaffolds.
+
+    Returns a list of RDKit ExplicitBitVect objects (empty list if unavailable).
+    """
+    fps = []
+    if not HAS_RDKIT or not os.path.exists(csv_path):
+        return fps
+    try:
+        import pandas as pd
+        df = pd.read_csv(csv_path).dropna(subset=["smiles"])
+        for smi in df["smiles"].tolist():
+            mol = Chem.MolFromSmiles(str(smi))
+            if mol is not None:
+                fps.append(AllChem.GetMorganFingerprintAsBitVect(
+                    mol, radius=radius, nBits=n_bits))
+        print(f"[CCLE ref] {len(fps)} reference fingerprints loaded "
+              f"(Tanimoto diversity baseline)")
+    except Exception as e:
+        print(f"[WARN] Could not load CCLE reference fps: {e}")
+    return fps
+
+
 # ─── Hyper-paramètres DQN ─────────────────────────────────────────────────────
 DQN_HP = dict(
     replay_buffer_size = 20_000,
@@ -253,6 +323,10 @@ DQN_HP = dict(
     max_halogens          = 1,    # v3.9: 1 halogène toléré (F médicinal courant)
     alkyne_penalty_coef   = 0.5,
     max_alkynes           = 0,
+    # ── SA score (Priority 4) — synthetic accessibility penalty
+    sa_penalty_coef       = 1.5,   # reward -= max(0, sa - 4.0) * sa_penalty_coef
+    sa_threshold          = 4.0,   # SA > 4 is penalised; SA 1–4 = synthesisable
+    lipinski_hard_penalty = 2.0,   # hard penalty when any Ro5 rule violated
     # ── Pénalité v5.0 : pas de cycle aromatique (plus nette — orienter vers arom)
     nonarom_penalty       = -1.0,  # v5.0: signal plus clair
     log_interval          = 50,
@@ -375,14 +449,16 @@ class QNetwork(keras.Model):
 # ─── Environnement SELFIES ────────────────────────────────────────────────────
 class SELFIESEnv:
     def __init__(self, twin, feat, vocab: SELFIESVocabulary,
-                 z_omics: tf.Tensor, hp: dict = DQN_HP, past_fps: List = None):
-        self.twin     = twin
-        self.feat     = feat
-        self.vocab    = vocab
-        self.hp       = hp
-        self.past_fps = past_fps or []
-        self.max_len  = hp["max_selfies_len"]
-        self._z_np    = z_omics.numpy().flatten()
+                 z_omics: tf.Tensor, hp: dict = DQN_HP, past_fps: List = None,
+                 ccle_ref_fps: List = None):
+        self.twin         = twin
+        self.feat         = feat
+        self.vocab        = vocab
+        self.hp           = hp
+        self.past_fps     = past_fps or []
+        self.ccle_ref_fps = ccle_ref_fps or []   # CCLE reference for diversity
+        self.max_len      = hp["max_selfies_len"]
+        self._z_np        = z_omics.numpy().flatten()
         self.tokens: List[int] = []
         self.step_count = 0
 
@@ -417,6 +493,18 @@ class SELFIESEnv:
         return self._state(action), reward, done
 
     def _compute_reward(self) -> float:
+        """
+        Priority 4 reward function: QED + SA score + Lipinski + LogP + IC50 + Tanimoto.
+
+        Formula (spec):
+          reward += qed * 2.0
+          reward -= max(0, sa - 4.0) * 1.5       # SA score penalty (1=easy, 10=hard)
+          if not lipinski_ok: reward -= 2.0       # hard Ro5 penalty
+          reward += diversity * diversity_weight   # vs CCLE drugs + past generations
+
+        All existing structural penalties (carbon, repeats, stereo, charges, etc.)
+        are preserved so previously learned avoidance behaviour is not regressed.
+        """
         smiles = self.vocab.decode(self.tokens)
         if not smiles:
             return -0.5
@@ -429,63 +517,51 @@ class SELFIESEnv:
         if mol is None:
             return -0.5
 
-        # v4.0 — Rejet hard : F/Cl/Br/I tous interdits (F=9 aussi — exploit v4.0)
-        _FORBIDDEN_ATOMS = {9, 17, 35, 53}  # F, Cl, Br, I
-        atom_nums_set = {a.GetAtomicNum() for a in mol.GetAtoms()}
-        if atom_nums_set & _FORBIDDEN_ATOMS:
+        # Hard reject: F/Cl/Br/I (vocab-level filter not 100% tight due to SELFIES semantics)
+        _FORBIDDEN_ATOMS = {9, 17, 35, 53}
+        if {a.GetAtomicNum() for a in mol.GetAtoms()} & _FORBIDDEN_ATOMS:
             return -1.0
 
         n_heavy = mol.GetNumHeavyAtoms()
         if n_heavy < 5:
             return -0.2
 
-        # ── Pénalités douces (déductions, jamais de retour anticipé)
+        # ── Structural penalties (unchanged from v5.0) ────────────────────────
         penalties = 0.0
 
-        # Fraction carbone insuffisante
         atom_nums = [a.GetAtomicNum() for a in mol.GetAtoms()]
         n_carbon  = atom_nums.count(6)
         if n_carbon == 0 or (n_carbon / n_heavy) < self.hp["min_carbon_frac"]:
-            penalties += self.hp["carbon_penalty"]   # -0.5
+            penalties += self.hp["carbon_penalty"]
 
-        # Cumulènes
         can_smi = Chem.MolToSmiles(mol)
         if can_smi.count("=C=") + can_smi.count("=c=") >= 3:
-            penalties += self.hp["cumul_penalty"]    # -0.5
+            penalties += self.hp["cumul_penalty"]
 
-        # Taille excessive
         if n_heavy > self.hp["max_heavy_atoms"]:
             penalties -= (n_heavy - self.hp["max_heavy_atoms"]) * self.hp["size_penalty_coef"]
 
-        # Répétition token
         counts  = collections.Counter(self.tokens)
         max_rep = max(counts.values()) if counts else 0
         if max_rep > self.hp["max_token_repeat"]:
             penalties -= (max_rep - self.hp["max_token_repeat"]) * self.hp["repeat_penalty_coef"]
 
-        # Stéréochimie excessive
         stereo_count = sum(counts[i] for i in self.vocab.stereo_idxs if i in counts)
         if stereo_count > self.hp["max_stereo_centers"]:
             penalties -= (stereo_count - self.hp["max_stereo_centers"]) * self.hp["stereo_penalty_coef"]
 
-        # ── Pénalités drug-likeness v3.7 ──────────────────────────────────────
-        # Charges formelles (Cl[C+1]=[C+1]... exploitation)
         charged_atoms = sum(1 for a in mol.GetAtoms() if a.GetFormalCharge() != 0)
         if charged_atoms > 0:
             penalties -= charged_atoms * self.hp["charge_penalty_coef"]
 
-        # Isotopes (tokens filtrés du vocab, mais un token peut encoder un isotope
-        # via SELFIES sémantique — vérification sur la molécule RDKit)
         if any(a.GetIsotope() != 0 for a in mol.GetAtoms()):
-            penalties += self.hp["isotope_penalty"]   # valeur négative
+            penalties += self.hp["isotope_penalty"]
 
-        # Halogènes excessifs (F=9, Cl=17, Br=35, I=53)
         HALOGENS = {9, 17, 35, 53}
         n_halogens = sum(1 for a in mol.GetAtoms() if a.GetAtomicNum() in HALOGENS)
         if n_halogens > self.hp["max_halogens"]:
             penalties -= (n_halogens - self.hp["max_halogens"]) * self.hp["halogen_penalty_coef"]
 
-        # Polynes (C#C carbone-carbone — chaînes acétyléniques non drug-like)
         n_alkynes = sum(
             1 for b in mol.GetBonds()
             if b.GetBondTypeAsDouble() == 3.0
@@ -495,52 +571,62 @@ class SELFIESEnv:
         if n_alkynes > self.hp["max_alkynes"]:
             penalties -= (n_alkynes - self.hp["max_alkynes"]) * self.hp["alkyne_penalty_coef"]
 
-        # Pas de cycle aromatique — cyclopropane ne suffit plus (v3.7)
         try:
             n_arom_rings = rdMolDescriptors.CalcNumAromaticRings(mol)
             if n_arom_rings == 0:
-                penalties += self.hp["nonarom_penalty"]   # valeur négative
+                penalties += self.hp["nonarom_penalty"]
         except Exception:
             pass
 
+        # ── Positive rewards (Priority 4 formula) ────────────────────────────
         reward = 0.0
 
-        # QED
+        # QED: spec formula reward += qed * 2.0
         try:
-            reward += self.hp["qed_weight"] * rdQED.qed(mol)
+            qed_val = rdQED.qed(mol)
+            reward += qed_val * 2.0
+        except Exception:
+            qed_val = 0.0
+
+        # SA score: reward -= max(0, sa - threshold) * coef
+        # SA 1 = trivially synthesisable, 10 = very hard; penalise above 4.0
+        if _sascorer is not None:
+            try:
+                sa = _sascorer.calculateScore(mol)
+                reward -= max(0.0, sa - self.hp["sa_threshold"]) * self.hp["sa_penalty_coef"]
+            except Exception:
+                pass
+
+        # Lipinski Rule of 5 — hard penalty when violated (spec: if not lipinski_ok: -2.0)
+        try:
+            mw  = Descriptors.MolWt(mol)
+            hbd = rdMolDescriptors.CalcNumHBD(mol)
+            hba = rdMolDescriptors.CalcNumHBA(mol)
+            lp  = Descriptors.MolLogP(mol)
+            lipinski_ok = (mw <= 500 and lp <= 5 and hbd <= 5 and hba <= 10)
+            if not lipinski_ok:
+                reward -= self.hp["lipinski_hard_penalty"]   # -2.0
+        except Exception:
+            lipinski_ok = True
+
+        # LogP gaussian bonus centred on 2 (keeps signal for drug-like range)
+        try:
+            reward += self.hp["logp_weight"] * float(np.exp(-((lp - 2.0) ** 2) / 4.0))
         except Exception:
             pass
 
-        # LogP gaussien centré sur 2
-        try:
-            logp = Descriptors.MolLogP(mol)
-            reward += self.hp["logp_weight"] * float(np.exp(-((logp - 2.0) ** 2) / 4.0))
-        except Exception:
-            pass
-
-        # Bonus cycles aromatiques
+        # Aromatic ring bonus
         try:
             n_arom = rdMolDescriptors.CalcNumAromaticRings(mol)
             reward += self.hp["arom_bonus"] * min(n_arom, 3) / 3.0
         except Exception:
             pass
 
-        # Lipinski Rule of 5
+        # IC50 predicted by Digital Twin
         try:
-            mw  = Descriptors.MolWt(mol)
-            hbd = rdMolDescriptors.CalcNumHBD(mol)
-            hba = rdMolDescriptors.CalcNumHBA(mol)
-            lp  = Descriptors.MolLogP(mol)
-            if mw <= 500 and hbd <= 5 and hba <= 10 and lp <= 5:
-                reward += self.hp["lipinski_bonus"]
-        except Exception:
-            pass
-
-        # IC50 prédit
-        try:
-            af  = self.feat.featurize(smiles)[np.newaxis]
-            adj = np.ones((1, HP["max_atoms"], HP["max_atoms"]), dtype=np.float32)
-            inp = (tf.constant(af), tf.constant(adj),
+            af, adj_mat = self.feat.featurize(smiles)
+            inp = (tf.constant(af[np.newaxis]),
+                   tf.constant(adj_mat[np.newaxis]),
                    tf.zeros([1, HP["gex_dim"]]),
                    tf.zeros([1, HP["mut_dim"]]),
                    tf.zeros([1, HP["cnv_dim"]]))
@@ -550,14 +636,19 @@ class SELFIESEnv:
         except Exception:
             pass
 
-        # Diversité Tanimoto
-        if self.past_fps:
-            try:
-                fp  = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
-                sim = DataStructs.BulkTanimotoSimilarity(fp, self.past_fps)
-                reward += (1.0 - max(sim)) * self.hp["diversity_weight"]
-            except Exception:
-                pass
+        # Tanimoto diversity vs CCLE reference drugs + past generated molecules.
+        # diversity = 1 - max_similarity so lower similarity → higher reward.
+        # We use the union of both sets: CCLE reference gives a stable chemical space
+        # baseline; past_fps penalises self-repetition within a single run.
+        try:
+            fp = AllChem.GetMorganFingerprintAsBitVect(mol, 2, nBits=1024)
+            all_ref = self.ccle_ref_fps + self.past_fps
+            if all_ref:
+                sim = DataStructs.BulkTanimotoSimilarity(fp, all_ref)
+                diversity = 1.0 - max(sim)
+                reward += diversity * self.hp["diversity_weight"]
+        except Exception:
+            pass
 
         return float(np.clip(reward + penalties, -1.0, 10.0))
 
@@ -586,7 +677,12 @@ class DQNDrugOptimizer:
         self.best_reward = -float("inf")
         self.past_fps: List = []
 
-        print(f"[DQN-SELFIES v5.0] state_dim={state_dim} | vocab_size={vocab_size}")
+        # Load CCLE reference fingerprints once at init; used in every reward call
+        self.ccle_ref_fps: List = load_ccle_reference_fps()
+
+        sa_status = "enabled" if _sascorer is not None else "DISABLED (sascorer not found)"
+        print(f"[DQN-SELFIES v5.1] state_dim={state_dim} | vocab_size={vocab_size}")
+        print(f"  SA score: {sa_status} | CCLE ref fps: {len(self.ccle_ref_fps)}")
 
     def _warmstart_buffer(self, z: tf.Tensor, seed_smiles: List[str]):
         """
@@ -610,7 +706,8 @@ class DQNDrugOptimizer:
                 continue
 
             env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
-                               hp=self.hp, past_fps=self.past_fps)
+                               hp=self.hp, past_fps=self.past_fps,
+                               ccle_ref_fps=self.ccle_ref_fps)
             state = env.reset()
             for i, action in enumerate(token_ids):
                 action = min(action, self.vocab.vocab_size - 1)
@@ -694,7 +791,8 @@ class DQNDrugOptimizer:
 
         for ep in range(1, n_episodes + 1):
             env   = SELFIESEnv(self.twin, self.feat, self.vocab, z,
-                               hp=self.hp, past_fps=self.past_fps)
+                               hp=self.hp, past_fps=self.past_fps,
+                               ccle_ref_fps=self.ccle_ref_fps)
             state = env.reset()
             ep_r, ep_loss = 0.0, []
 
