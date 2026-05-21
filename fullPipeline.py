@@ -1709,7 +1709,21 @@ def load_ccle_real_data(
     if n == 0:
         return None, None, 0
 
-    # Stack only IC50 (small: 103k floats = 400 KB) to compute z-score stats,
+    # Subsample to 20k triplets to fit in WSL2 32GB RAM (103k × 6 arrays = ~22GB peak)
+    if n > 20000:
+        rng_sub = np.random.default_rng(42)
+        sub_idx = rng_sub.choice(n, size=20000, replace=False)
+        sub_idx.sort()
+        samples_atoms = [samples_atoms[i] for i in sub_idx]
+        samples_adj   = [samples_adj[i]   for i in sub_idx]
+        samples_gex   = [samples_gex[i]   for i in sub_idx]
+        samples_mut   = [samples_mut[i]   for i in sub_idx]
+        samples_cna   = [samples_cna[i]   for i in sub_idx]
+        samples_ic50  = [samples_ic50[i]  for i in sub_idx]
+        n = 20000
+        print(f"  [RAM] Sous-échantillonnage → {n:,} triplets (WSL2 32GB limit)")
+
+    # Stack only IC50 (small) to compute z-score stats,
     # then build arrays for each modality separately to avoid a single 22 GB peak.
     ic50_arr  = np.array(samples_ic50, dtype=np.float32)
 

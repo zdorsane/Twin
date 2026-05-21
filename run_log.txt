@@ -1,3 +1,3 @@
-[Thu May 21 14:57:58 WAT 2026] Starting fullPipeline.py -> logs/run_gpu_main
+[Thu May 21 15:33:07 WAT 2026] Starting fullPipeline.py -> logs/run_gpu_main
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1779371904.677034   90619 device_compiler.h:186] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+I0000 00:00:1779374009.239145  143145 device_compiler.h:186] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
