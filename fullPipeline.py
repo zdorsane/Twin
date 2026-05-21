@@ -1364,7 +1364,11 @@ def load_ccle_real_data(
     val_split=0.15,
     batch_size=HP['batch_size'],
     random_seed=42,
-    split_mode='random',   # 'random' | 'leave_drug_out' | 'leave_cell_out'
+    split_mode='random',
+    # Accepted values (aliases accepted for both naming conventions):
+    #   'random'          — triplets shuffled randomly; drugs appear in both splits
+    #   'leave_drug_out'  | 'unseen_drugs'       — zero drug overlap between splits
+    #   'leave_cell_out'  | 'unseen_cell_lines'  — zero cell-line overlap between splits
 ):
     """
     Charge les vraies données CCLE :
@@ -1373,7 +1377,17 @@ def load_ccle_real_data(
       - data_cna.txt                  : Copy-Number Alterations (CNV)
       - data_mutations.txt            : mutations somatiques
     Retourne (train_ds, val_ds, n_samples) ou (None, None, 0) si fichiers absents.
+
+    Split strategies (Priority 3):
+      random            Optimistic upper bound; drugs seen at train time appear in val.
+      leave_drug_out /  True OOD drug generalisation; val drugs never seen during
+        unseen_drugs    training.  Harder: tests structure-activity extrapolation.
+      leave_cell_out /  True OOD cell-line generalisation; val cell lines never seen.
+        unseen_cells    Tests omics-to-IC50 extrapolation across new tumour profiles.
     """
+    # Normalise alias names
+    _alias = {'unseen_drugs': 'leave_drug_out', 'unseen_cell_lines': 'leave_cell_out'}
+    split_mode = _alias.get(split_mode, split_mode)
     ic50_path = os.path.join(ccle_dir, 'data_drug_treatment_ic50.txt')
     gex_path  = os.path.join(ccle_dir, 'data_mrna_seq_rpkm.txt')
     cna_path  = os.path.join(ccle_dir, 'data_cna.txt')
@@ -1533,6 +1547,32 @@ def load_ccle_real_data(
         print(f"  Drogues exclues (pas de SMILES) : {n_skipped} → "
               f"{skipped_names[:5]}{'...' if n_skipped>5 else ''}")
 
+    # ── IC50 validation (Priority 3): scan raw IC50 values before transform
+    raw_ic50_vals = []
+    for drug_id in drug_ids:
+        for cell in common_cells:
+            v = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
+            raw_ic50_vals.append(v)
+    raw_ic50_vals = np.array(raw_ic50_vals, dtype=np.float64)
+
+    n_total_entries = len(raw_ic50_vals)
+    n_nan    = int(np.isnan(raw_ic50_vals).sum())
+    n_inf    = int(np.isinf(raw_ic50_vals).sum())
+    raw_valid = raw_ic50_vals[~np.isnan(raw_ic50_vals) & ~np.isinf(raw_ic50_vals) & (raw_ic50_vals > 0)]
+    n_nonpos = int(n_total_entries - n_nan - n_inf - len(raw_valid))
+    n_outlier = int((raw_valid > 100).sum())
+
+    print(f"\n  ── IC50 Validation (Priority 3) ──────────────────────────────")
+    print(f"  Raw IC50 entries    : {n_total_entries:,}  (drugs × cell lines)")
+    print(f"  Valid (>0, finite)  : {len(raw_valid):,}")
+    print(f"  Removed NaN/inf     : {n_nan + n_inf:,}  ({100*(n_nan+n_inf)/n_total_entries:.1f}%)")
+    print(f"  Non-positive (<=0)  : {n_nonpos:,}  (clamped to 0.001 µM before log1p)")
+    print(f"  Outliers >100 µM    : {n_outlier:,}  ({100*n_outlier/max(len(raw_valid),1):.1f}%)"
+          f"  — kept (high IC50 = resistant, biologically meaningful)")
+    print(f"  IC50 range          : {raw_valid.min():.4f} — {raw_valid.max():.1f} µM")
+    print(f"  Percentiles [1,50,99]: {np.percentile(raw_valid,[1,50,99]).round(3)}")
+    print(f"  ─────────────────────────────────────────────────────────────")
+
     # ── Construire les triplets (drug, cell_line, ic50)
     samples_atoms, samples_adj, samples_gex, samples_mut, samples_cna, samples_ic50 = \
         [], [], [], [], [], []
@@ -1545,9 +1585,11 @@ def load_ccle_real_data(
             continue
         for ci, cell in enumerate(common_cells):
             ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
-            if np.isnan(ic50_val):
+            if np.isnan(ic50_val) or np.isinf(ic50_val):
                 continue
-            ic50_log = np.log1p(max(ic50_val, 0.001))  # log(µM), évite log(0)
+            # log1p transform: compresses extreme outliers (max 400k µM → log1p ≈ 12.9)
+            # clamp to 0.001 to avoid log(0); negatives are absent in CCLE but guarded
+            ic50_log = np.log1p(max(float(ic50_val), 0.001))
             samples_atoms.append(drug_atom_feats[drug_id])
             samples_adj.append(drug_adj_feats[drug_id])
             samples_gex.append(gex_mat[ci])
@@ -1567,9 +1609,15 @@ def load_ccle_real_data(
     cna_arr   = np.stack(samples_cna).astype(np.float32)
     ic50_arr  = np.array(samples_ic50, dtype=np.float32)
 
-    # Normaliser IC50
+    # Post-log1p diagnostics
+    print(f"  Post-log1p IC50     : min={ic50_arr.min():.4f}  max={ic50_arr.max():.4f}"
+          f"  mean={ic50_arr.mean():.4f}  std={ic50_arr.std():.4f}")
+
+    # z-score normalise so the regression head sees ~ N(0,1) targets
     ic50_mean, ic50_std = ic50_arr.mean(), ic50_arr.std() + 1e-6
     ic50_arr = (ic50_arr - ic50_mean) / ic50_std
+    print(f"  Post-zscore IC50    : min={ic50_arr.min():.3f}  max={ic50_arr.max():.3f}"
+          f"  mean={ic50_arr.mean():.3f}  std={ic50_arr.std():.3f}")
 
     # Shuffle & split
     # Note: only drugs that had valid SMILES were added to samples, so all splits
@@ -1921,7 +1969,7 @@ def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_d
 
 
 def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
-                 loss_mode='kl', beta_anneal=False):
+                 loss_mode='kl', beta_anneal=False, split_mode='random'):
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
@@ -1950,6 +1998,7 @@ def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
     train_ds, val_ds, n_real = load_ccle_real_data(
         ccle_dir='Dataset/ccle_broad_2019',
         batch_size=HP['batch_size'],
+        split_mode=split_mode,
     )
     if train_ds is None:
         print("\n[Data] CCLE non disponible — données synthétiques utilisées.")
@@ -2058,6 +2107,11 @@ def compare_pretraining(epochs=20):
 
 
 if __name__ == "__main__":
+    _SPLIT_CHOICES = [
+        'random',
+        'leave_drug_out',   'unseen_drugs',
+        'leave_cell_out',   'unseen_cell_lines',
+    ]
     parser = argparse.ArgumentParser(description='Run Bi-Int full pipeline with optional ChEMBL pre-training comparison.')
     parser.add_argument('--mode', choices=['pretrained', 'baseline', 'compare'], default='pretrained', help='Pipeline mode to execute')
     parser.add_argument('--epochs', type=int, default=20, help='Number of IC50 training epochs')
@@ -2068,14 +2122,19 @@ if __name__ == "__main__":
                         help='VAE loss mode (default: cross_entropy — best on CCLE benchmark)')
     parser.add_argument('--beta-anneal', action='store_true',
                         help='Linearly ramp β from 0 to vae_beta over vae_anneal_epochs (KL modes only)')
+    parser.add_argument('--split-mode', choices=_SPLIT_CHOICES, default='random',
+                        help='Train/val split strategy (default: random). '
+                             'unseen_drugs / leave_drug_out: zero drug overlap. '
+                             'unseen_cell_lines / leave_cell_out: zero cell-line overlap.')
     args = parser.parse_args()
 
     if args.mode == 'baseline':
         run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False,
-                     loss_mode=args.loss_mode, beta_anneal=args.beta_anneal)
+                     loss_mode=args.loss_mode, beta_anneal=args.beta_anneal,
+                     split_mode=args.split_mode)
     elif args.mode == 'compare':
         compare_pretraining(epochs=args.epochs)
     else:
         run_pipeline(use_pretrained=True, epochs=args.epochs, rl_episodes=args.rl_episodes,
                      run_ppo=not args.no_ppo, loss_mode=args.loss_mode,
-                     beta_anneal=args.beta_anneal)
+                     beta_anneal=args.beta_anneal, split_mode=args.split_mode)
