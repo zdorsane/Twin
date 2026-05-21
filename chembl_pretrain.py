@@ -38,10 +38,11 @@ PRETRAIN_HP = {
     'batch_size'    : 64,
     'learning_rate' : 1e-3,
     'max_atoms'     : 60,
-    'max_compounds' : 100_000,
-    'chunk_size'    : 25_000,
+    'max_compounds' : None,       # None = toutes les 2.8M molécules via streaming HDF5
+    'chunk_size'    : 10_000,     # molécules traitées par chunk SDF (RAM ~500 MB max)
     'val_split'     : 0.1,
     'random_seed'   : 42,
+    'hdf5_cache'    : 'Dataset/chembl_features.h5',   # cache featurisé sur disque
 }
 
 # Liste des descripteurs prédits (cibles multi-tâches)
@@ -73,53 +74,124 @@ def compute_descriptors(mol):
         return None
 
 
-def load_chembl_sdf(sdf_path, max_compounds=None):
+def stream_chembl_to_hdf5(sdf_path, hdf5_path, featurizer, max_atoms, chunk_size=10_000):
     """
-    Lit le SDF ChEMBL et retourne un DataFrame avec :
-      - smiles      : SMILES canonique
-      - descriptors : np.array(N_TARGETS,) de descripteurs RDKit
-    Si max_compounds=None, charge toutes les molécules valides.
-    """
-    print(f"[LOAD] ChEMBL SDF : {sdf_path}")
-    print(f"       Limite : {'toutes' if max_compounds is None else max_compounds} molécules")
-    try:
-        from rdkit import Chem
-    except ImportError:
-        print("[ERROR] RDKit est requis pour cette version corrigée.")
-        sys.exit(1)
+    Lit le SDF ChEMBL par chunks de chunk_size molécules, featurise chaque chunk,
+    et écrit immédiatement dans un fichier HDF5 (append mode).
+    RAM peak = chunk_size × (max_atoms×16 + max_atoms×max_atoms + 8) float32
+             ≈ 10k × (60×16 + 60×60 + 8) × 4 bytes ≈ 170 MB — stable quelle que soit la taille du SDF.
 
-    records = []
-    skipped = 0
-    total_seen = 0
+    Retourne (n_total, mean, std) où mean/std sont calculés en deux passes sur le HDF5.
+    """
+    import h5py
+    from rdkit import Chem
+
+    print(f"[STREAM] ChEMBL SDF → HDF5 : {sdf_path}")
+    print(f"         Cache              : {hdf5_path}")
+    print(f"         Chunk size         : {chunk_size:,} molécules")
+
+    # Si le cache existe déjà, recalculer mean/std et retourner directement
+    if os.path.exists(hdf5_path):
+        print(f"[STREAM] Cache HDF5 existant détecté — recalcul mean/std...")
+        with h5py.File(hdf5_path, 'r') as h5:
+            n = h5['targets'].shape[0]
+            # Calcul mean/std en une seule passe (tout le dataset tient en float32)
+            targets = h5['targets'][:]
+        mean, std = targets.mean(axis=0), targets.std(axis=0) + 1e-6
+        print(f"  {n:,} molécules déjà featurisées. Ré-utilisation du cache.")
+        return n, mean, std
+
+    os.makedirs(os.path.dirname(hdf5_path) if os.path.dirname(hdf5_path) else '.', exist_ok=True)
     supplier = Chem.SDMolSupplier(sdf_path, removeHs=True, sanitize=True)
 
+    total_valid = 0
+    total_seen  = 0
+    skipped     = 0
+
+    # Buffers de chunk
+    chunk_af, chunk_adj, chunk_desc = [], [], []
+
+    def _flush_chunk(h5_handle):
+        nonlocal total_valid
+        if not chunk_af:
+            return
+        af_arr   = np.stack(chunk_af).astype(np.float32)
+        adj_arr  = np.stack(chunk_adj).astype(np.float32)
+        desc_arr = np.stack(chunk_desc).astype(np.float32)
+        n = af_arr.shape[0]
+        if 'atom_feats' not in h5_handle:
+            h5_handle.create_dataset('atom_feats', data=af_arr,
+                maxshape=(None, max_atoms, af_arr.shape[-1]), chunks=(256, max_atoms, af_arr.shape[-1]))
+            h5_handle.create_dataset('adj_matrix', data=adj_arr,
+                maxshape=(None, max_atoms, max_atoms), chunks=(256, max_atoms, max_atoms))
+            h5_handle.create_dataset('targets', data=desc_arr,
+                maxshape=(None, desc_arr.shape[-1]), chunks=(256, desc_arr.shape[-1]))
+        else:
+            for key, arr in [('atom_feats', af_arr), ('adj_matrix', adj_arr), ('targets', desc_arr)]:
+                old = h5_handle[key].shape[0]
+                h5_handle[key].resize(old + n, axis=0)
+                h5_handle[key][old:old + n] = arr
+        total_valid += n
+        chunk_af.clear(); chunk_adj.clear(); chunk_desc.clear()
+
+    with h5py.File(hdf5_path, 'w') as h5:
+        for mol in supplier:
+            total_seen += 1
+            if total_seen % 100_000 == 0:
+                print(f"  ... {total_seen:,} scannées | {total_valid:,} valides | {skipped:,} ignorées")
+
+            if mol is None or mol.GetNumAtoms() > max_atoms:
+                skipped += 1
+                continue
+            smi = Chem.MolToSmiles(mol)
+            if not smi or len(smi) < 3:
+                skipped += 1
+                continue
+            desc = compute_descriptors(mol)
+            if desc is None or not np.all(np.isfinite(desc)):
+                skipped += 1
+                continue
+            af, adj = featurizer.featurize(smi)
+            if af is None:
+                skipped += 1
+                continue
+
+            chunk_af.append(af); chunk_adj.append(adj); chunk_desc.append(desc)
+            if len(chunk_af) >= chunk_size:
+                _flush_chunk(h5)
+
+        _flush_chunk(h5)  # dernier chunk partiel
+
+        print(f"\n  Total scanné  : {total_seen:,}")
+        print(f"  Valides       : {total_valid:,}")
+        print(f"  Ignorées      : {skipped:,}")
+        print(f"  HDF5 écrit    : {hdf5_path}  ({os.path.getsize(hdf5_path)/1e9:.2f} GB)")
+
+        targets = h5['targets'][:]
+
+    mean, std = targets.mean(axis=0), targets.std(axis=0) + 1e-6
+    return total_valid, mean, std
+
+
+def load_chembl_sdf(sdf_path, max_compounds=None):
+    """Conservé pour compatibilité — utilisé uniquement si max_compounds est fixé (tests rapides)."""
+    from rdkit import Chem
+    print(f"[LOAD] ChEMBL SDF (mode limité) : max={max_compounds}")
+    records, skipped, total_seen = [], 0, 0
+    supplier = Chem.SDMolSupplier(sdf_path, removeHs=True, sanitize=True)
     for mol in supplier:
         total_seen += 1
-        if total_seen % 100_000 == 0:
-            print(f"  ... {total_seen:,} lues | {len(records):,} valides | {skipped:,} ignorées")
-
-        if mol is None:
-            skipped += 1
-            continue
+        if mol is None: skipped += 1; continue
         smi = Chem.MolToSmiles(mol)
-        if not smi or len(smi) < 3:
-            skipped += 1
-            continue
-        if mol.GetNumAtoms() > PRETRAIN_HP['max_atoms']:
-            skipped += 1
-            continue
+        if not smi or len(smi) < 3: skipped += 1; continue
+        if mol.GetNumAtoms() > PRETRAIN_HP['max_atoms']: skipped += 1; continue
         desc = compute_descriptors(mol)
-        if desc is None or not np.all(np.isfinite(desc)):
-            skipped += 1
-            continue
+        if desc is None or not np.all(np.isfinite(desc)): skipped += 1; continue
         records.append({'smiles': smi, 'descriptors': desc})
-        if max_compounds is not None and len(records) >= max_compounds:
+        if max_compounds and len(records) >= max_compounds:
             break
-
     df = pd.DataFrame(records)
-    print(f"\n  Total scanné       : {total_seen:,}")
-    print(f"  Molécules valides  : {len(df):,}")
-    print(f"  Ignorées           : {skipped:,}")
+    print(f"  Valides : {len(df):,} | Ignorées : {skipped:,}")
     return df
 
 

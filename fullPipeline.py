@@ -104,10 +104,10 @@ HP = dict(
 
     # GNN
     gnn_layers      = 3,
-    max_atoms       = 60,
+    max_atoms       = 50,
 
     # Training
-    batch_size      = 32,
+    batch_size      = 8,
     learning_rate   = 1e-4,
     dropout_rate    = 0.1,
 
@@ -1493,43 +1493,59 @@ def load_ccle_real_data(
     drug_ids   = list(ic50_df.index)
     print(f"  IC50 : {len(drug_ids)} drogues × {len(cell_lines)} lignées")
 
-    # ── GEx : lignes = gènes, colonnes = lignées
-    # Read directly as float32 to avoid the default float64 DataFrame (saves ~8 GB RAM).
-    # apply(pd.to_numeric) on a 17k-gene × 1k-cell matrix in float64 allocates ~17 GB;
-    # reading with dtype avoids that entirely.
-    print("  Chargement GEx (504 MB → float32)...")
-    gex_df = pd.read_csv(gex_path, sep='\t', index_col=0, dtype=np.float32).fillna(0.0)
-    common_cells_gex = [c for c in cell_lines if c in gex_df.columns]
+    # ── NPZ cache: skip the 504 MB CSV parse on repeated runs (saves ~10-20 min)
+    omics_cache = os.path.join(ccle_dir, f'omics_cache_gex{gex_dim}_cna{cnv_dim}.npz')
+    if os.path.exists(omics_cache):
+        print(f"  [Cache] Chargement depuis {omics_cache} ...")
+        cache = np.load(omics_cache, allow_pickle=True)
+        common_cells = list(cache['common_cells'])
+        gex_mat = cache['gex_mat']
+        cna_mat = cache['cna_mat']
+        print(f"  GEx shape : {gex_mat.shape}  [depuis cache]")
+        print(f"  CNA shape : {cna_mat.shape}  [depuis cache]")
+    else:
+        # ── GEx : lignes = gènes, colonnes = lignées
+        print("  Chargement GEx (504 MB → float32) — peut prendre 5-15 min...")
+        gex_df = pd.read_csv(gex_path, sep='\t', index_col=0, low_memory=True).apply(pd.to_numeric, errors='coerce').fillna(0.0)
+        common_cells_gex = [c for c in cell_lines if c in gex_df.columns]
 
-    # ── CNA : lignes = gènes, colonnes = lignées
-    print("  Chargement CNA...")
-    cna_df = pd.read_csv(cna_path, sep='\t', index_col=0, dtype=np.float32).fillna(0.0)
-    common_cells_cna = [c for c in cell_lines if c in cna_df.columns]
+        # ── CNA : lignes = gènes, colonnes = lignées
+        print("  Chargement CNA...")
+        cna_df = pd.read_csv(cna_path, sep='\t', index_col=0, low_memory=True).apply(pd.to_numeric, errors='coerce').fillna(0.0)
+        common_cells_cna = [c for c in cell_lines if c in cna_df.columns]
 
-    # sorted() ensures a deterministic row order across runs (set intersection is unordered)
-    common_cells = sorted(set(common_cells_gex) & set(common_cells_cna))
-    if len(common_cells) == 0:
-        print("[CCLE] Aucune lignée commune entre IC50/GEx/CNA — fallback synthétique.")
-        return None, None, 0
-    print(f"  Lignées communes IC50+GEx+CNA : {len(common_cells)}")
+        # sorted() ensures a deterministic row order across runs (set intersection is unordered)
+        common_cells = sorted(set(common_cells_gex) & set(common_cells_cna))
+        if len(common_cells) == 0:
+            print("[CCLE] Aucune lignée commune entre IC50/GEx/CNA — fallback synthétique.")
+            return None, None, 0
+        print(f"  Lignées communes IC50+GEx+CNA : {len(common_cells)}")
 
-    # ── Sélectionner top gènes par variance pour respecter gex_dim exactement
-    gex_sub = gex_df[common_cells].T  # (cells, genes)
-    gene_var = gex_sub.var(axis=0)
-    top_genes = gene_var.sort_values(ascending=False).index[:gex_dim].tolist()
-    gex_mat = gex_sub[top_genes].values[:, :gex_dim].astype(np.float32)
-    gex_mean, gex_std = gex_mat.mean(axis=0), gex_mat.std(axis=0) + 1e-6
-    gex_mat = (gex_mat - gex_mean) / gex_std
-    print(f"  GEx shape : {gex_mat.shape}")  # (cells, 978)
-    del gex_df, gex_sub  # free ~4–8 GB before CNA/mutations
+        # ── Sélectionner top gènes par variance pour respecter gex_dim exactement
+        # Downcast to float32 before variance computation to halve working memory
+        gex_df = gex_df.astype(np.float32)
+        gex_sub = gex_df[common_cells].T  # (cells, genes)
+        gene_var = gex_sub.var(axis=0)
+        top_genes = gene_var.sort_values(ascending=False).index[:gex_dim].tolist()
+        gex_mat = gex_sub[top_genes].values[:, :gex_dim].astype(np.float32)
+        gex_mean, gex_std = gex_mat.mean(axis=0), gex_mat.std(axis=0) + 1e-6
+        gex_mat = (gex_mat - gex_mean) / gex_std
+        print(f"  GEx shape : {gex_mat.shape}")  # (cells, 978)
+        del gex_df, gex_sub  # free ~4–8 GB before CNA/mutations
 
-    # ── CNA : top gènes par variance → cnv_dim exactement
-    cna_sub = cna_df[common_cells].T
-    cna_var = cna_sub.var(axis=0)
-    top_cna_genes = cna_var.sort_values(ascending=False).index[:cnv_dim].tolist()
-    cna_mat = cna_sub[top_cna_genes].values[:, :cnv_dim].astype(np.float32)
-    print(f"  CNA shape : {cna_mat.shape}")  # (cells, 426)
-    del cna_df, cna_sub  # free CNA DataFrame
+        # ── CNA : top gènes par variance → cnv_dim exactement
+        cna_df = cna_df.astype(np.float32)
+        cna_sub = cna_df[common_cells].T
+        cna_var = cna_sub.var(axis=0)
+        top_cna_genes = cna_var.sort_values(ascending=False).index[:cnv_dim].tolist()
+        cna_mat = cna_sub[top_cna_genes].values[:, :cnv_dim].astype(np.float32)
+        print(f"  CNA shape : {cna_mat.shape}")  # (cells, 426)
+        del cna_df, cna_sub  # free CNA DataFrame
+
+        # ── Save NPZ cache for future runs
+        np.savez_compressed(omics_cache, common_cells=np.array(common_cells),
+                            gex_mat=gex_mat, cna_mat=cna_mat)
+        print(f"  [Cache] Sauvegardé → {omics_cache}")
 
     # ── Mutations : binarisées sur mut_dim gènes les plus mutés
     # Row ordering follows common_cells exactly (same sorted list as GEx/CNA).
@@ -1693,11 +1709,8 @@ def load_ccle_real_data(
     if n == 0:
         return None, None, 0
 
-    atoms_arr = np.stack(samples_atoms).astype(np.float32)
-    adj_arr   = np.stack(samples_adj).astype(np.float32)
-    gex_arr   = np.stack(samples_gex).astype(np.float32)
-    mut_arr   = np.stack(samples_mut).astype(np.float32)
-    cna_arr   = np.stack(samples_cna).astype(np.float32)
+    # Stack only IC50 (small: 103k floats = 400 KB) to compute z-score stats,
+    # then build arrays for each modality separately to avoid a single 22 GB peak.
     ic50_arr  = np.array(samples_ic50, dtype=np.float32)
 
     # Post-log1p diagnostics
@@ -1709,6 +1722,14 @@ def load_ccle_real_data(
     ic50_arr = (ic50_arr - ic50_mean) / ic50_std
     print(f"  Post-zscore IC50    : min={ic50_arr.min():.3f}  max={ic50_arr.max():.3f}"
           f"  mean={ic50_arr.mean():.3f}  std={ic50_arr.std():.3f}")
+
+    # Stack each modality separately — peak RAM = one array at a time (~3 GB each)
+    # rather than all six simultaneously (~22 GB).
+    atoms_arr = np.stack(samples_atoms).astype(np.float32); del samples_atoms
+    adj_arr   = np.stack(samples_adj).astype(np.float32);   del samples_adj
+    gex_arr   = np.stack(samples_gex).astype(np.float32);   del samples_gex
+    mut_arr   = np.stack(samples_mut).astype(np.float32);   del samples_mut
+    cna_arr   = np.stack(samples_cna).astype(np.float32);   del samples_cna
 
     # Shuffle & split
     # Note: only drugs that had valid SMILES were added to samples, so all splits
