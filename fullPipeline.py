@@ -814,14 +814,15 @@ class BiIntDigitalTwin(Model):
 
 class BiIntTrainer:
     def __init__(self, model: BiIntDigitalTwin, hp=HP, loss_mode: str = 'kl',
-                 beta_anneal: bool = False):
+                 beta_anneal: bool = False,
+                 log_dir: str = "logs",
+                 early_stopping_patience: int = 5):
         """
-        loss_mode   : 'kl' (default) | 'cross_entropy' | 'both'
-        beta_anneal : if True and loss_mode contains KL, linearly ramp β from
-                      hp['vae_beta_start'] to hp['vae_beta'] over
-                      hp['vae_anneal_epochs'] epochs.
-                      Prevents early KL collapse: model learns reconstruction
-                      before regularization is applied.
+        loss_mode              : 'kl' (default) | 'cross_entropy' | 'both'
+        beta_anneal            : ramp β from vae_beta_start → vae_beta over vae_anneal_epochs
+        log_dir                : root for TensorBoard events, CSV, and JSON val-curve
+        early_stopping_patience: stop if val RMSE does not improve for this many epochs
+                                 (0 = disabled)
         """
         self.model       = model
         self.hp          = hp
@@ -830,6 +831,9 @@ class BiIntTrainer:
         self.current_beta = hp.get('vae_beta_start', 0.0) if beta_anneal else hp['vae_beta']
         self.opt         = keras.optimizers.AdamW(hp['learning_rate'])
         self.mse         = keras.losses.MeanSquaredError()
+        self.log_dir     = log_dir
+        self.es_patience = early_stopping_patience
+        os.makedirs(log_dir, exist_ok=True)
 
     def _beta(self, epoch: int) -> float:
         """Compute annealed β for the current epoch (1-indexed)."""
@@ -853,8 +857,10 @@ class BiIntTrainer:
         grads = tape.gradient(total_loss, self.model.trainable_variables)
         self.opt.apply_gradients(zip(grads, self.model.trainable_variables))
         rmse = tf.sqrt(regression_loss)
+        # L2 norm of all non-None gradients
+        grad_norm = tf.linalg.global_norm([g for g in grads if g is not None])
         return {'total_loss': total_loss, 'regression_loss': regression_loss,
-                'kl_loss': vae_loss, 'rmse': rmse}
+                'kl_loss': vae_loss, 'rmse': rmse, 'grad_norm': grad_norm}
 
     def val_step(self, batch, beta: float = None):
         drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
@@ -868,45 +874,123 @@ class BiIntTrainer:
                 'val_rmse': rmse}
 
     def fit(self, train_ds, val_ds, epochs=50):
+        import csv
         from scipy.stats import pearsonr as _pearsonr
-        history = {'train': [], 'val': [], 'pearson_r': [], 'beta': []}
+
+        # ── Logging setup ──────────────────────────────────────────────────────
+        tb_writer  = tf.summary.create_file_writer(os.path.join(self.log_dir, "tb"))
+        csv_path   = os.path.join(self.log_dir, "training_log.csv")
+        json_path  = os.path.join(self.log_dir, "val_curves.json")
+
+        csv_fields = ["epoch", "train_rmse", "val_rmse", "pearson_r",
+                      "grad_norm", "beta", "kl_loss"]
+        csv_file   = open(csv_path, "w", newline="")
+        csv_writer = csv.DictWriter(csv_file, fieldnames=csv_fields)
+        csv_writer.writeheader()
+
+        history = {
+            "train_rmse": [], "val_rmse": [], "pearson_r": [],
+            "grad_norm": [],  "beta": [],     "kl_loss": [],
+        }
+
+        # ── Early-stopping state ───────────────────────────────────────────────
+        best_val  = float("inf")
+        es_count  = 0
+        stopped_early = False
+
         for epoch in range(1, epochs + 1):
             beta = self._beta(epoch)
-            train_metrics = {}
-            for batch in train_ds:
-                metrics = self.train_step(batch, beta=beta)
-                for k, v in metrics.items():
-                    train_metrics.setdefault(k, []).append(v.numpy())
+            train_metrics: dict[str, list] = {}
 
-            y_true_all, y_pred_all = [], []
-            val_rmse_list = []
+            for batch in train_ds:
+                step_out = self.train_step(batch, beta=beta)
+                for k, v in step_out.items():
+                    train_metrics.setdefault(k, []).append(float(v.numpy()))
+
+            # ── Validation pass with Pearson r ─────────────────────────────────
+            y_true_all, y_pred_all, val_rmse_list = [], [], []
             for batch in val_ds:
                 drug_atoms, adj_mask, gex, mut, cnv, ic50_true = batch
-                ic50_pred, vae_loss = self.model(
+                ic50_pred, _ = self.model(
                     (drug_atoms, adj_mask, gex, mut, cnv),
                     training=False, loss_mode=self.loss_mode)
                 regression_loss = self.mse(ic50_true, ic50_pred)
-                val_rmse_list.append(tf.sqrt(regression_loss).numpy())
+                val_rmse_list.append(float(tf.sqrt(regression_loss).numpy()))
                 y_true_all.extend(ic50_true.numpy().tolist())
                 y_pred_all.extend(ic50_pred.numpy().ravel().tolist())
 
-            t_rmse = np.mean(train_metrics['rmse'])
-            v_rmse = np.mean(val_rmse_list)
-            history['train'].append(t_rmse)
-            history['val'].append(v_rmse)
-            history['beta'].append(beta)
+            t_rmse    = float(np.mean(train_metrics["rmse"]))
+            v_rmse    = float(np.mean(val_rmse_list))
+            grad_norm = float(np.mean(train_metrics.get("grad_norm", [0.0])))
+            kl_loss   = float(np.mean(train_metrics.get("kl_loss",   [0.0])))
 
             pr = 0.0
             if len(y_true_all) > 1:
                 pr, _ = _pearsonr(y_true_all, y_pred_all)
-            history['pearson_r'].append(float(pr))
+            pr = float(pr)
 
+            # ── TensorBoard ────────────────────────────────────────────────────
+            with tb_writer.as_default():
+                tf.summary.scalar("train/rmse",    t_rmse,    step=epoch)
+                tf.summary.scalar("val/rmse",      v_rmse,    step=epoch)
+                tf.summary.scalar("val/pearson_r", pr,        step=epoch)
+                tf.summary.scalar("train/grad_norm", grad_norm, step=epoch)
+                tf.summary.scalar("train/kl_loss", kl_loss,   step=epoch)
+                tf.summary.scalar("train/beta",    beta,      step=epoch)
+
+            # ── CSV row ────────────────────────────────────────────────────────
+            row = {
+                "epoch": epoch, "train_rmse": round(t_rmse, 6),
+                "val_rmse": round(v_rmse, 6), "pearson_r": round(pr, 6),
+                "grad_norm": round(grad_norm, 6), "beta": round(beta, 6),
+                "kl_loss": round(kl_loss, 6),
+            }
+            csv_writer.writerow(row)
+            csv_file.flush()
+
+            # ── History dict ───────────────────────────────────────────────────
+            history["train_rmse"].append(t_rmse)
+            history["val_rmse"].append(v_rmse)
+            history["pearson_r"].append(pr)
+            history["grad_norm"].append(grad_norm)
+            history["beta"].append(beta)
+            history["kl_loss"].append(kl_loss)
+
+            # ── Console print ──────────────────────────────────────────────────
             if epoch % 5 == 0 or epoch == 1:
-                loss_label = self.loss_mode.upper()
                 beta_str = f" β={beta:.3f}" if self.beta_anneal else ""
-                print(f"Epoch {epoch:3d} | Train RMSE: {t_rmse:.4f} | "
-                      f"Val RMSE: {v_rmse:.4f} | Pearson r: {pr:.4f} | "
-                      f"{loss_label}: {np.mean(train_metrics['kl_loss']):.4f}{beta_str}")
+                print(
+                    f"Epoch {epoch:3d} | Train RMSE: {t_rmse:.4f} | "
+                    f"Val RMSE: {v_rmse:.4f} | Pearson r: {pr:.4f} | "
+                    f"{self.loss_mode.upper()}: {kl_loss:.4f}{beta_str} | "
+                    f"‖∇‖={grad_norm:.2f}"
+                )
+
+            # ── Early stopping ─────────────────────────────────────────────────
+            if self.es_patience > 0:
+                if v_rmse < best_val - 1e-5:
+                    best_val = v_rmse
+                    es_count = 0
+                else:
+                    es_count += 1
+                    if es_count >= self.es_patience:
+                        print(f"[EarlyStopping] No improvement for {self.es_patience} "
+                              f"epochs — stopping at epoch {epoch}.")
+                        stopped_early = True
+                        break
+
+        # ── Finalise logging ───────────────────────────────────────────────────
+        csv_file.close()
+        with open(json_path, "w") as f:
+            json.dump({"epochs_run": len(history["val_rmse"]),
+                       "stopped_early": stopped_early,
+                       **history}, f, indent=2)
+        print(f"[Trainer] Logs → {self.log_dir}/  "
+              f"(TensorBoard, {os.path.basename(csv_path)}, {os.path.basename(json_path)})")
+
+        # Keep legacy keys for code that reads history['train'] / history['val']
+        history["train"] = history["train_rmse"]
+        history["val"]   = history["val_rmse"]
         return history
 
 
@@ -1901,7 +1985,8 @@ def main():
 
     # ── Train
     print("\n[Training] Bi-Int Digital Twin on IC50 prediction (QSAR sur CCLE)...")
-    trainer = BiIntTrainer(model, HP)
+    trainer = BiIntTrainer(model, HP, log_dir=log_dir,
+                           early_stopping_patience=early_stopping_patience)
     history = trainer.fit(train_ds, val_ds, epochs=20)
 
     # ── RL Drug Generation
@@ -1969,7 +2054,8 @@ def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_d
 
 
 def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
-                 loss_mode='kl', beta_anneal=False, split_mode='random'):
+                 loss_mode='kl', beta_anneal=False, split_mode='random',
+                 log_dir='logs', early_stopping_patience=0):
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
@@ -2008,7 +2094,9 @@ def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
         print(f"\n[Data] Données CCLE réelles chargées ({n_real:,} triplets).")
 
     print("\n[Training] Bi-Int Digital Twin on IC50 prediction (QSAR)...")
-    trainer = BiIntTrainer(model, HP, loss_mode=loss_mode, beta_anneal=beta_anneal)
+    trainer = BiIntTrainer(model, HP, loss_mode=loss_mode, beta_anneal=beta_anneal,
+                           log_dir=log_dir,
+                           early_stopping_patience=early_stopping_patience)
     history = trainer.fit(train_ds, val_ds, epochs=epochs)
 
     final_stats = None
@@ -2126,15 +2214,23 @@ if __name__ == "__main__":
                         help='Train/val split strategy (default: random). '
                              'unseen_drugs / leave_drug_out: zero drug overlap. '
                              'unseen_cell_lines / leave_cell_out: zero cell-line overlap.')
+    parser.add_argument('--log-dir', default='logs',
+                        help='Directory for TensorBoard events, training_log.csv, and val_curves.json')
+    parser.add_argument('--early-stopping', type=int, default=0, metavar='PATIENCE',
+                        help='Stop if val RMSE does not improve for PATIENCE epochs (0 = disabled)')
     args = parser.parse_args()
 
     if args.mode == 'baseline':
         run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False,
                      loss_mode=args.loss_mode, beta_anneal=args.beta_anneal,
-                     split_mode=args.split_mode)
+                     split_mode=args.split_mode,
+                     log_dir=args.log_dir,
+                     early_stopping_patience=args.early_stopping)
     elif args.mode == 'compare':
         compare_pretraining(epochs=args.epochs)
     else:
         run_pipeline(use_pretrained=True, epochs=args.epochs, rl_episodes=args.rl_episodes,
                      run_ppo=not args.no_ppo, loss_mode=args.loss_mode,
-                     beta_anneal=args.beta_anneal, split_mode=args.split_mode)
+                     beta_anneal=args.beta_anneal, split_mode=args.split_mode,
+                     log_dir=args.log_dir,
+                     early_stopping_patience=args.early_stopping)
