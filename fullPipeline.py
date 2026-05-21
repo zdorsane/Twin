@@ -20,7 +20,7 @@ Architecture Overview
 """
 
 # ─── Imports ────────────────────────────────────────────────────────────────
-import os, math, json, warnings, logging, argparse
+import os, math, json, warnings, logging, argparse, pickle, time
 import concurrent.futures
 
 # Suppress all warnings properly
@@ -121,27 +121,213 @@ HP = dict(
 
 # ─── 1. MOLECULAR FEATURIZER (BRICS + GNN) ──────────────────────────────────
 
+# PubChem REST endpoint for SMILES lookup
+_PUBCHEM_URL = (
+    "https://pubchem.ncbi.nlm.nih.gov/rest/pug/compound/name"
+    "/{name}/property/IsomericSMILES,CanonicalSMILES/JSON"
+)
+_PUBCHEM_DELAY   = 0.25   # seconds between requests
+_PUBCHEM_TIMEOUT = 10     # seconds per request
+
+try:
+    import requests as _requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+
+def query_pubchem_smiles(
+    drug_name: str,
+    cache: dict,
+    cache_path: str = "Dataset/drug_smiles_cache.pkl",
+) -> str | None:
+    """
+    Return a canonical SMILES string for *drug_name* using a 3-tier lookup:
+
+    1. In-memory *cache* dict (populated by the caller from CSV + previous queries)
+    2. PubChem REST API (only reached for cache misses)
+    3. Returns ``None`` if PubChem has no record — no random fallback.
+
+    The on-disk pickle at *cache_path* is updated whenever a new PubChem hit is
+    stored, so the API is called at most once per unique drug name across runs.
+
+    Parameters
+    ----------
+    drug_name : str
+        Raw CCLE drug name, e.g. ``"Afatinib-1"`` or ``"Imatinib"``.
+    cache : dict
+        Mutable dict shared across calls; maps ``drug_name → smiles``.
+    cache_path : str
+        Path to the on-disk pickle cache.
+
+    Returns
+    -------
+    str | None
+        SMILES string or ``None`` if unavailable.
+    """
+    import re
+
+    # Strip CCLE replicate suffix: "Afatinib-1" → "Afatinib"
+    query_name = re.sub(r'-\d+$', '', drug_name.strip())
+
+    # Tier 1: in-memory cache (exact match on original and stripped name)
+    if drug_name in cache:
+        return cache[drug_name]
+    if query_name in cache:
+        smiles = cache[query_name]
+        cache[drug_name] = smiles
+        return smiles
+
+    # Tier 2: PubChem API
+    if not HAS_REQUESTS:
+        return None
+
+    try:
+        url = _PUBCHEM_URL.format(name=_requests.utils.quote(query_name))
+        resp = _requests.get(url, timeout=_PUBCHEM_TIMEOUT)
+        time.sleep(_PUBCHEM_DELAY)
+
+        if resp.status_code == 200:
+            props = (resp.json()
+                     .get("PropertyTable", {})
+                     .get("Properties", [{}])[0])
+            smiles = props.get("IsomericSMILES") or props.get("CanonicalSMILES")
+            if smiles:
+                cache[drug_name]  = smiles
+                cache[query_name] = smiles
+                # Persist to disk
+                try:
+                    os.makedirs(os.path.dirname(cache_path) or ".", exist_ok=True)
+                    with open(cache_path, "wb") as fh:
+                        pickle.dump(cache, fh)
+                except OSError:
+                    pass
+                return smiles
+    except Exception:
+        pass
+
+    cache[drug_name] = None   # mark as attempted to avoid re-querying
+    return None
+
+
+def build_smiles_cache(
+    csv_path: str = "Dataset/ccle_drug_smiles.csv",
+    pkl_path: str = "Dataset/drug_smiles_cache.pkl",
+) -> dict:
+    """
+    Build an in-memory SMILES cache from (in priority order):
+      1. On-disk pickle (fastest, includes any previous PubChem queries)
+      2. ``ccle_drug_smiles.csv`` produced by fetch_drug_smiles.py
+
+    Returns a dict mapping drug_name → smiles (str) for hits,
+    drug_name → None for confirmed misses.
+    """
+    cache: dict = {}
+
+    # Load pickle first (may contain superset of CSV)
+    if os.path.exists(pkl_path):
+        try:
+            with open(pkl_path, "rb") as fh:
+                cache = pickle.load(fh)
+        except Exception:
+            cache = {}
+
+    # Merge CSV (CSV wins only for entries not already in pickle)
+    if os.path.exists(csv_path):
+        try:
+            csv_df = pd.read_csv(csv_path)
+            for _, row in csv_df.iterrows():
+                name = row.get("drug_name", "")
+                smiles = row.get("smiles", None)
+                if pd.isna(smiles):
+                    smiles = None
+                if name and name not in cache:
+                    cache[name] = smiles
+        except Exception as e:
+            print(f"  [WARN] Could not read SMILES CSV: {e}")
+
+    n_hits   = sum(1 for v in cache.values() if v is not None)
+    n_misses = sum(1 for v in cache.values() if v is None)
+    print(f"  [SMILES cache] {n_hits} hits, {n_misses} confirmed misses "
+          f"({len(cache)} total entries)")
+    return cache
+
+
 class BRICSMolecularFeaturizer:
     """
-    Decomposes SMILES via BRICS (Break Retrosynthetically Interesting
-    Chemical Substructures), then builds atom-level feature matrices.
-    """
-    ATOM_FEATURES = ['C','N','O','S','F','Cl','Br','I','P','other']
-    HYBRIDIZATIONS = ['SP','SP2','SP3','SP3D','SP3D2','other']
-    MAX_ATOMS = HP['max_atoms']
+    Drug molecular featurizer with two complementary representations:
 
-    def featurize(self, smiles: str) -> np.ndarray:
-        """Returns [MAX_ATOMS, node_feature_dim] matrix."""
+    * ``featurize(smiles)``  — atom-level feature matrix + bond adjacency
+      for the GNN encoder (topology-aware, permutation-sensitive).
+    * ``morgan_fingerprint(smiles)``  — ECFP4 Morgan fingerprint (radius=2,
+      nBits=2048) as a fixed-length bit vector for baseline models.
+
+    Both return zero arrays on invalid / missing SMILES so downstream code
+    never sees None.
+    """
+    ATOM_FEATURES  = ['C','N','O','S','F','Cl','Br','I','P','other']
+    HYBRIDIZATIONS = ['SP','SP2','SP3','SP3D','SP3D2','other']
+    MAX_ATOMS      = HP['max_atoms']
+    ATOM_FEAT_DIM  = 22   # sum of one-hot + scalar features per atom
+
+    def featurize(self, smiles: str) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Build atom-feature matrix and bond-adjacency matrix from SMILES.
+
+        Returns
+        -------
+        atom_feat : np.ndarray, shape (MAX_ATOMS, ATOM_FEAT_DIM)
+        adj       : np.ndarray, shape (MAX_ATOMS, MAX_ATOMS)
+            Symmetric binary adjacency from bond topology (1 = bond exists).
+        """
+        adj = np.zeros((self.MAX_ATOMS, self.MAX_ATOMS), dtype=np.float32)
         if not HAS_RDKIT:
-            return np.random.randn(self.MAX_ATOMS, 22).astype(np.float32)
+            return (np.zeros((self.MAX_ATOMS, self.ATOM_FEAT_DIM), dtype=np.float32),
+                    adj)
         mol = Chem.MolFromSmiles(smiles)
         if mol is None:
-            return np.zeros((self.MAX_ATOMS, 22), dtype=np.float32)
-        atoms = list(mol.GetAtoms())[:self.MAX_ATOMS]
-        feat_matrix = np.zeros((self.MAX_ATOMS, 22), dtype=np.float32)
-        for i, atom in enumerate(atoms):
+            return (np.zeros((self.MAX_ATOMS, self.ATOM_FEAT_DIM), dtype=np.float32),
+                    adj)
+
+        n_atoms = min(mol.GetNumAtoms(), self.MAX_ATOMS)
+        feat_matrix = np.zeros((self.MAX_ATOMS, self.ATOM_FEAT_DIM), dtype=np.float32)
+        for i, atom in enumerate(list(mol.GetAtoms())[:self.MAX_ATOMS]):
             feat_matrix[i] = self._atom_features(atom)
-        return feat_matrix
+
+        # Bond adjacency — topology-derived, not random
+        for bond in mol.GetBonds():
+            i, j = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+            if i < self.MAX_ATOMS and j < self.MAX_ATOMS:
+                adj[i, j] = 1.0
+                adj[j, i] = 1.0
+        # Self-loops aid GCN propagation
+        np.fill_diagonal(adj, 1.0)
+
+        return feat_matrix, adj
+
+    def morgan_fingerprint(
+        self, smiles: str, radius: int = 2, n_bits: int = 2048
+    ) -> np.ndarray:
+        """
+        Compute an ECFP4 Morgan fingerprint as a binary bit vector.
+
+        Parameters
+        ----------
+        smiles  : SMILES string
+        radius  : Morgan radius (2 → ECFP4)
+        n_bits  : fingerprint length
+
+        Returns
+        -------
+        np.ndarray, shape (n_bits,), dtype float32 — zeros on failure.
+        """
+        if not HAS_RDKIT:
+            return np.zeros(n_bits, dtype=np.float32)
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return np.zeros(n_bits, dtype=np.float32)
+        fp = AllChem.GetMorganFingerprintAsBitVect(mol, radius=radius, nBits=n_bits)
+        return np.array(fp, dtype=np.float32)
 
     def _atom_features(self, atom) -> np.ndarray:
         sym = atom.GetSymbol()
@@ -166,7 +352,7 @@ class BRICSMolecularFeaturizer:
 
     def brics_fragment_matrix(self, smiles: str) -> np.ndarray:
         """Appends BRICS fragment fingerprints as extra atom features."""
-        base = self.featurize(smiles)
+        base, _ = self.featurize(smiles)   # unpack (atoms, adj)
         if HAS_RDKIT:
             mol = Chem.MolFromSmiles(smiles)
             if mol:
@@ -1219,7 +1405,8 @@ def load_ccle_real_data(
     cna_df = cna_df.apply(pd.to_numeric, errors='coerce').fillna(0.0)
     common_cells_cna = [c for c in cell_lines if c in cna_df.columns]
 
-    common_cells = list(set(common_cells_gex) & set(common_cells_cna))
+    # sorted() ensures a deterministic row order across runs (set intersection is unordered)
+    common_cells = sorted(set(common_cells_gex) & set(common_cells_cna))
     if len(common_cells) == 0:
         print("[CCLE] Aucune lignée commune entre IC50/GEx/CNA — fallback synthétique.")
         return None, None, 0
@@ -1242,60 +1429,109 @@ def load_ccle_real_data(
     print(f"  CNA shape : {cna_mat.shape}")  # doit être (cells, 426)
 
     # ── Mutations : binarisées sur mut_dim gènes les plus mutés
+    # Row ordering follows common_cells exactly (same sorted list as GEx/CNA).
+    # Alignment: mut_mat[i] corresponds to common_cells[i] for all i.
     mut_mat_full = np.zeros((len(common_cells), mut_dim), dtype=np.float32)
+    n_cells_with_mut = 0
     if os.path.exists(mut_path):
         try:
             mut_df = pd.read_csv(mut_path, sep='\t', low_memory=False,
                                   comment='#', on_bad_lines='skip')
             if 'Hugo_Symbol' in mut_df.columns and 'Tumor_Sample_Barcode' in mut_df.columns:
-                mut_df['cell'] = mut_df['Tumor_Sample_Barcode'].str.split('_').str[0]
-                mut_df = mut_df[mut_df['cell'].isin(common_cells)]
+                # Use full Tumor_Sample_Barcode (e.g. "22RV1_PROSTATE") — matches
+                # common_cells directly.  The old split('_')[0] → "22RV1" never matched.
+                common_cells_set = set(common_cells)
+                mut_df = mut_df[mut_df['Tumor_Sample_Barcode'].isin(common_cells_set)]
+                n_cells_with_mut = mut_df['Tumor_Sample_Barcode'].nunique()
+
                 gene_counts = mut_df['Hugo_Symbol'].value_counts().head(mut_dim)
                 top_mut_genes = gene_counts.index.tolist()
                 cell_idx_map = {c: i for i, c in enumerate(common_cells)}
                 for gi, gene in enumerate(top_mut_genes):
-                    cells_w_mut = mut_df[mut_df['Hugo_Symbol'] == gene]['cell'].unique()
+                    cells_w_mut = mut_df[
+                        mut_df['Hugo_Symbol'] == gene]['Tumor_Sample_Barcode'].unique()
                     for c in cells_w_mut:
                         if c in cell_idx_map:
                             mut_mat_full[cell_idx_map[c], gi] = 1.0
+                print(f"  Mutations : {n_cells_with_mut}/{len(common_cells)} lignées couvertes, "
+                      f"{len(top_mut_genes)} gènes (top: {top_mut_genes[:5]})")
         except Exception as e:
             print(f"  [WARN] Mutations non chargées : {e}")
+    else:
+        print(f"  [WARN] {mut_path} absent — mutation features = zeros.")
     mut_mat = mut_mat_full
+
+    # ── Alignment assertions (Priority 2)
+    assert mut_mat.shape[0] == gex_mat.shape[0], (
+        f"Row mismatch: mut_mat={mut_mat.shape[0]} vs gex_mat={gex_mat.shape[0]}"
+    )
+    assert mut_mat.shape[0] == cna_mat.shape[0], (
+        f"Row mismatch: mut_mat={mut_mat.shape[0]} vs cna_mat={cna_mat.shape[0]}"
+    )
+    assert mut_mat.shape[1] == mut_dim, (
+        f"mut_mat cols={mut_mat.shape[1]} != mut_dim={mut_dim}"
+    )
+    mut_sparsity = 1.0 - mut_mat.mean()
+    print(f"  Mutations shape : {mut_mat.shape}  sparsity={mut_sparsity:.3f}  "
+          f"mean_mutations_per_cell={mut_mat.sum(axis=1).mean():.1f}")
+    print(f"  [P2-assert] mutation_matrix.shape[0] == expression_matrix.shape[0] "
+          f"→ {mut_mat.shape[0]} == {gex_mat.shape[0]}  ✓")
 
     # ── Featuriser les SMILES des drogues via BRICSMolecularFeaturizer
     featurizer = BRICSMolecularFeaturizer()
 
-    # Charger le CSV de SMILES réels si disponible (produit par fetch_drug_smiles.py)
+    # Build SMILES cache: CSV (from fetch_drug_smiles.py) + on-disk pkl + PubChem fallback
     smiles_csv = os.path.join(ccle_dir, '..', 'ccle_drug_smiles.csv')
-    smiles_map = {}
-    if os.path.exists(smiles_csv):
-        smiles_df = pd.read_csv(smiles_csv)
-        smiles_df = smiles_df.dropna(subset=['smiles'])
-        smiles_map = dict(zip(smiles_df['drug_name'], smiles_df['smiles']))
-        n_mapped = sum(1 for d in drug_ids if d in smiles_map)
-        print(f"  SMILES réels chargés : {n_mapped}/{len(drug_ids)} drogues mappées")
-    else:
-        print(f"  [WARN] {smiles_csv} absent — features drogues aléatoires (random vectors).")
-        print(f"         Lancez fetch_drug_smiles.py pour obtenir de vraies features chimiques.")
+    pkl_cache  = os.path.join(ccle_dir, '..', 'drug_smiles_cache.pkl')
+    smiles_cache = build_smiles_cache(csv_path=smiles_csv, pkl_path=pkl_cache)
+
+    # For drugs still missing, attempt PubChem query (at most once per drug per run)
+    missing_drugs = [d for d in drug_ids if smiles_cache.get(d) is None]
+    if missing_drugs and HAS_REQUESTS:
+        print(f"  [PubChem] Querying {len(missing_drugs)} drugs missing from cache ...")
+        for drug_id in missing_drugs:
+            query_pubchem_smiles(drug_id, smiles_cache, cache_path=pkl_cache)
 
     drug_atom_feats = {}
     drug_adj_feats  = {}
-    rng_drug = np.random.default_rng(random_seed)
+    drug_morgan_fps = {}   # ECFP4, shape (2048,) — used by baseline models
+    n_real_smiles   = 0
+
+    # Validation summary: first 5 drugs
+    _summary_printed = 0
+
     for drug_id in drug_ids:
-        smiles = smiles_map.get(drug_id)
+        smiles = smiles_cache.get(drug_id)
         if smiles and HAS_RDKIT:
             try:
                 atoms, adj = featurizer.featurize(smiles)
+                morgan_fp  = featurizer.morgan_fingerprint(smiles, radius=2, n_bits=2048)
                 drug_atom_feats[drug_id] = atoms.astype(np.float32)
                 drug_adj_feats[drug_id]  = adj.astype(np.float32)
+                drug_morgan_fps[drug_id] = morgan_fp
+                n_real_smiles += 1
+                if _summary_printed < 5:
+                    print(f"  [P1-check] {drug_id:<35s} smiles={smiles[:30]!r}... "
+                          f"atom_feat={atoms.shape} morgan_fp={morgan_fp.shape} "
+                          f"fp_bits_on={int(morgan_fp.sum())}")
+                    _summary_printed += 1
                 continue
-            except Exception:
-                pass
-        # Fallback : vecteur aléatoire déterministe par drogue (seed fixe par index)
-        drug_atom_feats[drug_id] = rng_drug.standard_normal(
-            (max_atoms, atom_feat_dim)).astype(np.float32) * 0.1
-        drug_adj_feats[drug_id]  = (rng_drug.random(
-            (max_atoms, max_atoms)) > 0.8).astype(np.float32)
+            except Exception as exc:
+                print(f"  [WARN] featurize failed for {drug_id}: {exc}")
+
+        # drug has no valid SMILES — skip from training rather than using random noise
+        # (random vectors encode no chemical information and hurt generalization)
+        drug_atom_feats[drug_id] = None
+        drug_adj_feats[drug_id]  = None
+        drug_morgan_fps[drug_id] = None
+
+    n_skipped = sum(1 for v in drug_atom_feats.values() if v is None)
+    print(f"  Drogues avec vrais SMILES : {n_real_smiles}/{len(drug_ids)} "
+          f"({100*n_real_smiles/max(len(drug_ids),1):.1f}%)")
+    if n_skipped:
+        skipped_names = [d for d, v in drug_atom_feats.items() if v is None]
+        print(f"  Drogues exclues (pas de SMILES) : {n_skipped} → "
+              f"{skipped_names[:5]}{'...' if n_skipped>5 else ''}")
 
     # ── Construire les triplets (drug, cell_line, ic50)
     samples_atoms, samples_adj, samples_gex, samples_mut, samples_cna, samples_ic50 = \
@@ -1304,6 +1540,9 @@ def load_ccle_real_data(
     cell_to_idx = {c: i for i, c in enumerate(common_cells)}
 
     for drug_id in drug_ids:
+        # Skip drugs with no valid SMILES — random vectors carry no chemical signal
+        if drug_atom_feats[drug_id] is None:
+            continue
         for ci, cell in enumerate(common_cells):
             ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
             if np.isnan(ic50_val):
@@ -1333,16 +1572,17 @@ def load_ccle_real_data(
     ic50_arr = (ic50_arr - ic50_mean) / ic50_std
 
     # Shuffle & split
+    # Note: only drugs that had valid SMILES were added to samples, so all splits
+    # must replicate the same SMILES-filter when rebuilding per-sample drug/cell labels.
+    active_drug_ids = [d for d in drug_ids if drug_atom_feats[d] is not None]
+
     if split_mode == 'leave_drug_out':
-        sorted_drugs = sorted(set(drug_ids))
+        sorted_drugs = sorted(set(active_drug_ids))
         n_val_drugs  = max(1, int(len(sorted_drugs) * val_split))
         train_drug_set = set(sorted_drugs[:-n_val_drugs])
         val_drug_set   = set(sorted_drugs[-n_val_drugs:])
-        # Map each sample to its drug_id
-        # samples_atoms was built iterating drug_ids × common_cells in order
-        # Rebuild the sample→drug_id array from the same iteration order
         sample_drug_ids = []
-        for drug_id in drug_ids:
+        for drug_id in active_drug_ids:
             for ci, cell in enumerate(common_cells):
                 ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
                 if not np.isnan(ic50_val):
@@ -1358,7 +1598,7 @@ def load_ccle_real_data(
         train_cell_set = set(sorted_cells[:-n_val_cells])
         val_cell_set   = set(sorted_cells[-n_val_cells:])
         sample_cells = []
-        for drug_id in drug_ids:
+        for drug_id in active_drug_ids:
             for ci, cell in enumerate(common_cells):
                 ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
                 if not np.isnan(ic50_val):
@@ -1408,8 +1648,9 @@ class DigitalTwinInference:
         if clean_smi is None:
             return 10.0  # High IC50 for invalid SMILES
         
-        atom_feat = self.featurizer.featurize(clean_smi)[np.newaxis]
-        adj = np.ones((1, HP['max_atoms'], HP['max_atoms']), dtype=np.float32)
+        atom_feat_2d, adj_2d = self.featurizer.featurize(clean_smi)
+        atom_feat = atom_feat_2d[np.newaxis]
+        adj = adj_2d[np.newaxis]
         gex_t = tf.constant(gex[np.newaxis], dtype=tf.float32)
         mut_t = tf.constant(mut[np.newaxis], dtype=tf.float32)
         cnv_t = tf.constant(cnv[np.newaxis], dtype=tf.float32)
