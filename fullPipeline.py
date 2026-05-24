@@ -1757,10 +1757,9 @@ def load_ccle_real_data(
         val_drug_set   = set(sorted_drugs[-n_val_drugs:])
         sample_drug_ids = []
         for drug_id in active_drug_ids:
-            for ci, cell in enumerate(common_cells):
-                ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
-                if not np.isnan(ic50_val):
-                    sample_drug_ids.append(drug_id)
+            row = ic50_np[drug_row[drug_id]]
+            valid_ci = np.where(np.isfinite(row) & (row > 0))[0]
+            sample_drug_ids.extend([drug_id] * len(valid_ci))
         sample_drug_ids = np.array(sample_drug_ids)
         tr = np.where(np.isin(sample_drug_ids, list(train_drug_set)))[0]
         va = np.where(np.isin(sample_drug_ids, list(val_drug_set)))[0]
@@ -1773,10 +1772,9 @@ def load_ccle_real_data(
         val_cell_set   = set(sorted_cells[-n_val_cells:])
         sample_cells = []
         for drug_id in active_drug_ids:
-            for ci, cell in enumerate(common_cells):
-                ic50_val = ic50_df.loc[drug_id, cell] if cell in ic50_df.columns else np.nan
-                if not np.isnan(ic50_val):
-                    sample_cells.append(cell)
+            row = ic50_np[drug_row[drug_id]]
+            valid_ci = np.where(np.isfinite(row) & (row > 0))[0]
+            sample_cells.extend([common_cells[ci] for ci in valid_ci])
         sample_cells = np.array(sample_cells)
         tr = np.where(np.isin(sample_cells, list(train_cell_set)))[0]
         va = np.where(np.isin(sample_cells, list(val_cell_set)))[0]

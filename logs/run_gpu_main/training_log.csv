@@ -1,0 +1,2 @@
+epoch,train_rmse,val_rmse,pearson_r,grad_norm,beta,kl_loss
+1,0.944501,0.846366,0.491954,28.761779,2.0,0.474601
