@@ -1793,7 +1793,7 @@ def load_ccle_real_data(
             cna_arr[indices],   ic50_arr[indices],
         ))
         return ds.shuffle(min(len(indices), 5000), seed=random_seed) \
-                 .batch(batch_size).prefetch(tf.data.AUTOTUNE)
+                 .batch(batch_size, drop_remainder=True).prefetch(tf.data.AUTOTUNE)
 
     train_ds = make_real_ds(tr)
     val_ds   = make_real_ds(va)
