@@ -7,55 +7,98 @@
 
 ---
 
-## Known Limitations (honest summary)
+## Session Log — What Was Done, What Works, What Remains
 
-| Limitation | Status | Impact |
-|-----------|--------|--------|
-| Drug features = random vectors | **FIXED (P1)** — 201/266 drugs have real SMILES from PubChem; 65/266 still missing | IC50 model now uses real molecular features for 76% of drugs |
-| Mutations modality absent (MAF parsing issue) | **FIXED (P2)** — `comment='#', on_bad_lines='skip'`; full `Tumor_Sample_Barcode` string match; sorted common cells; shape assertions | All 3 omics modalities now load correctly: (647, 978), (647, 426), (647, 735) |
-| Leave-drug-out Pearson r = −0.35 | **Root cause confirmed** — previous result obtained with random drug vectors + zero mutation matrix; corrected run in progress (batch_size=16) | Will resolve after BiInt rerun completes on corrected data |
-| No simple baseline (Ridge, RF) for comparison | **FIXED (P5)** — `baseline_models.py` implements Ridge/RF/MLP/XGBoost with ECFP4(2048)+GEx+CNA+mut; R² metric added | Baseline results pending `python baseline_models.py` run |
-| SA score missing from DQN reward | **FIXED (P4)** — SA score + hard Lipinski penalty (−2.0) + Tanimoto CCLE diversity integrated | DQN reward now penalizes synthetically inaccessible molecules |
-| GPU OOM at batch_size=32 (BiInt training) | **Partially fixed** — batch_size reduced to 16; rerun in progress | BiInt 20-epoch results on corrected data not yet available |
-| 65/266 drugs missing SMILES | Pending — PubChem had no match after 3-level lookup (pkl cache + CSV + live query) | ~24% of drugs still use fallback random vectors |
+### Status at a glance (24 May 2026)
+
+| Component | Status | Key result |
+|-----------|--------|-----------|
+| ChEMBL GNN pre-training | ✅ Complete | Val RMSE = 0.2187 (epoch 9/10), val loss = 0.0491 |
+| CCLE data loading (P1–P3 fixed) | ✅ Complete | 647 cells, 201/266 drugs with SMILES, 103,477 triplets |
+| Omics NPZ cache | ✅ Complete | `omics_cache_gex978_cna426.npz` — instant reload |
+| BiInt training (corrected data) | ⏳ In progress | **Epoch 1: val RMSE = 0.846, Pearson r = 0.492** |
+| Baseline models (Random split) | ✅ **NEW — first real results** | Ridge r=0.864, MLP r=0.881, XGB r=0.849 |
+| Baseline models (Leave-Drug-Out) | ⏳ In progress | Results pending |
+| Baseline models (Leave-Cell-Out) | ⏳ In progress | Results pending |
+| BRICS-DQN generation | ✅ Complete | Best reward R=6.124, validity=60.5%, 5000 episodes |
+| Repo cleanup | ✅ **NEW** | `dqn_weights_*/`, `logs/`, weight files excluded from git |
+| "Digital twin" terminology | ✅ **NEW** | Reformulated as multimodal QSAR + honest note added |
 
 ---
 
-## Session Updates — 21 May 2026
+## Session Updates — 21–24 May 2026
 
-Six prioritised fixes (P1–P6) were implemented, committed, and verified on the RTX 4000 Ada this session.
+### Fixes applied 21 May 2026 (P1–P7)
 
-### P1 — Real drug SMILES (BRICSMolecularFeaturizer + 3-level lookup)
+Six prioritised fixes (P1–P6) implemented, plus P7 (OOM fixes):
 
-`BRICSMolecularFeaturizer` was rewritten to return a `(atom_feat, adj)` tuple with real topology derived from the BRICS decomposition. SMILES lookup now follows a 3-level cascade: (1) pickled cache, (2) `Dataset/ccle_drug_smiles.csv`, (3) live PubChem REST query. Of 266 CCLE drugs, **201 now have real SMILES**; 65 fall back to zero vectors. Random drug vectors are fully eliminated for 76% of the dataset.
+**P1 — Real drug SMILES:** `BRICSMolecularFeaturizer` rewritten with real BRICS topology adjacency. SMILES lookup: 3-level cascade (pkl cache → CSV → live PubChem REST). **201/266 CCLE drugs now have real SMILES** (76%); 65 still missing.
 
-### P2 — Mutation alignment fix
+**P2 — Mutation alignment:** Full `Tumor_Sample_Barcode` string match (not prefix). Sorted cell lines before index assignment. Shape assertions added. Resulting mutation matrix: **(647, 735), sparsity=0.844, mean 115 mutations/cell line**.
 
-`Tumor_Sample_Barcode` is now matched using the full cell-line string (not a prefix). Cell lines are sorted before any index assignment. Shape assertions (`assert gex.shape == (n_cells, gex_dim)` etc.) added to catch future misalignments. Resulting mutation matrix: **(647, 735), sparsity=0.844, mean 115 mutations/cell line**.
+**P3 — IC50 validation + 3 split modes:** Diagnostic logging of IC50 distribution (range 0.0001–400,374 µM; log1p mean=2.67, std=1.85). Three rigorous split modes: `random`, `leave_drug_out` (unseen drug scaffolds), `leave_cell_out` (unseen cell lines). 103,477 valid triplets after SMILES filter.
 
-### P3 — IC50 validation diagnostics + 3 split modes
+**P4 — DQN reward:** SA score (Ertl & Schuffenhauer synthetic accessibility) integrated. Hard Lipinski penalty −2.0 (not soft deduction). Tanimoto CCLE diversity bonus.
 
-`load_ccle_real_data()` now emits IC50 range and distribution diagnostics (range 0.0001–400,374 µM; post-log1p mean=2.67, std=1.85). Three split modes are supported via `--split-mode`: `random`, `leave_drug_out`, `leave_cell_out`. Valid triplets reduced to **103,477** after the SMILES filter (only drugs with real SMILES enter training). Omics features cached to `Dataset/ccle_broad_2019/omics_cache_gex978_cna426.npz`.
+**P5 — Baselines:** `baseline_models.py` implements Ridge / RF / MLP / XGBoost on ECFP4(2048) + GEx(978) + CNA(426) + Mut(735) = 4,187 features. R² + Pearson r + Spearman r reported per split.
 
-### P4 — DQN reward: SA score + hard Lipinski + Tanimoto CCLE diversity
+**P6 — Observability:** `BiIntTrainer.fit()` logs TensorBoard events, CSVLogger (`training_log.csv`), gradient L2 norm per epoch, EarlyStopping (patience=5).
 
-SA score (sascorer) is now computed per generated molecule. A hard penalty of −2.0 is applied when any Lipinski criterion is violated (not just a soft deduction). Tanimoto similarity against the CCLE training set is computed using Morgan fingerprints; a diversity bonus rewards novelty relative to known drugs.
+**P7 — OOM fixes:** GPU OOM (SelectV2 at `tf.maximum(kl_per_dim, free_bits)` in backward pass) fixed by switching to `--loss-mode cross_entropy`. CPU RAM OOM (22 GB peak from `np.stack()` on 6 modalities × 103k) fixed with: (a) sequential stack + immediate `del`, (b) 20k subsample via `np.random.default_rng(42).choice(n, 20000)`. NPZ omics cache added (`omics_cache_gex978_cna426.npz`) for instant reload.
 
-### P5 — Baseline models
+---
 
-`baseline_models.py` implements four baselines: Ridge, Random Forest, MLP, and XGBoost. Features are ECFP4 fingerprints (2048 bits) concatenated with GEx (978), CNA (426), and mutation (735) vectors. R² is reported alongside Pearson r for all split modes. Results pending a full run.
+### Fixes applied 24 May 2026 (P8–P9)
 
-### P6 — Training observability (TensorBoard + CSVLogger + EarlyStopping + gradient norm)
+**P8 — `leave_drug_out` / `leave_cell_out` NameError bug:** Both split modes referenced `ic50_df.loc[]` in an O(n²) loop (201 drugs × 647 cells = 130k `.loc[]` calls) *after* `del ic50_df`. Replaced with vectorised `ic50_np[drug_row[drug_id]]` lookup — O(n) instead of O(n²). This caused the training process to appear "frozen" for 3+ days.
 
-`BiIntTrainer.fit()` now records TensorBoard event files, a CSV training log, gradient L2 norm per epoch, and applies EarlyStopping (patience=5 on val_loss). GPU OOM at batch_size=32 (SelectV2 ResourceExhaustedError) was diagnosed and fixed by reducing to batch_size=16; rerun is in progress.
+**P9 — Epoch-2 crash fix (`drop_remainder=True`):** After epoch 1 completed, the second epoch crashed inside `tf.reshape()` with `tf.reduce_prod(tensor_shape[axis[0]:])` — caused by the last (incomplete) batch having a dynamic `None` batch dimension. Fixed with `batch(batch_size, drop_remainder=True)` in `make_real_ds()`.
 
-### Current ChEMBL pre-training result (this session)
+**Repo cleanup:** `.gitignore` updated to exclude `dqn_weights_*/`, `pretrained_weights/`, `logs/`, `run_log.txt`, `*.keras`. These are large binary/runtime files that do not belong in version control.
 
-10 epochs completed. Best checkpoint at epoch 9: **val_loss=0.0491, val RMSE=0.2187, val MAE=0.1552**. Weights saved to `pretrained_weights/chembl_drug_encoder.weights.h5`.
+**Terminology fix:** README header reformulated from "Digital Twin" to "Multimodal Drug Response Predictor". Added honest note: the term "digital twin" is aspirational — the model is a multimodal QSAR predictor; full personalisation would require patient-specific sequencing.
 
-### BiInt QSAR status
+---
 
-The previous Pearson r=0.884 (random split) and r=−0.35 (leave-drug-out) were obtained with **random drug vectors and a zero mutation matrix** — those numbers are not valid results for the corrected pipeline. A corrected 20-epoch run at batch_size=16 is currently in progress; results will be reported when complete.
+## First Real Baseline Results (24 May 2026, Random Split)
+
+These are the **first valid quantitative comparisons** between classical ML and the Bi-Int model on real CCLE data with corrected drug features and omics alignment.
+
+| Model | Features | RMSE | R² | Pearson r | Spearman r |
+|-------|----------|------|-----|-----------|------------|
+| Ridge regression | ECFP4 + GEx + CNA | 0.508 | 0.746 | **0.864** | 0.859 |
+| Ridge regression | GEx + CNA only | 0.971 | 0.070 | 0.265 | 0.254 |
+| Random Forest (50 trees) | ECFP4 + GEx + CNA | 0.824 | 0.331 | 0.584 | 0.616 |
+| MLP (512→256→128) | ECFP4 + GEx + CNA | 0.477 | 0.776 | **0.881** | 0.878 |
+| XGBoost (100 trees) | ECFP4 + GEx + CNA | 0.548 | 0.704 | 0.849 | 0.846 |
+| **Bi-Int (epoch 1)** | GNN + QuatVAE (GEx+CNA+Mut) | **0.846** | — | **0.492** | — |
+
+**Split: Leave-Drug-Out and Leave-Cell-Out results in progress.**
+
+### Scientific interpretation of Random Split results
+
+**Why Ridge r=0.864 on a "simple" model?** This is a known property of CCLE: when drug identity is encoded as a fixed ECFP4 fingerprint, a linear model can memorize drug-specific mean IC50 values (some drugs are universally potent, others universally weak). The high r on random split reflects this memorization, not genuine structure–activity learning.
+
+**The critical test is Leave-Drug-Out:** Here, the model must predict IC50 for drug scaffolds never seen during training. Ridge and RF are expected to drop sharply (r < 0.3) because they cannot generalize molecular structure knowledge. Bi-Int, with its GNN encoder pre-trained on 100k ChEMBL molecules, should generalize better.
+
+**Bi-Int epoch 1 r=0.492 on random split:** This is below Ridge (0.864) after only 1 epoch — expected, since the model hasn't converged yet and the GNN encoder is still adapting from the ChEMBL pre-training domain (property prediction) to the CCLE domain (IC50 prediction). Pearson r is expected to improve substantially over epochs 2–5.
+
+**Ridge (omics only) r=0.265:** When ECFP4 fingerprints are removed, a linear model on omics alone performs near-random. This confirms that the molecular structure signal is the dominant predictor in the random split — which is consistent with the memorization hypothesis above.
+
+---
+
+## Known Limitations (Honest Summary)
+
+| Limitation | Status | Scientific impact |
+|-----------|--------|------------------|
+| 65/266 drugs missing SMILES | ❌ Pending | 24% of CCLE drugs excluded from training; PubChem found no match after 3-level lookup (pkl + CSV + REST) |
+| Mutations file parsing error in baselines | ❌ Bug | `data_mutations.txt` has variable columns → `pd.read_csv` fails without `on_bad_lines='skip'`. Fixed in code, baseline re-run needed |
+| BiInt training not converged | ⏳ In progress | Only epoch 1 completed (r=0.492); 5-epoch run in progress on GPU |
+| Leave-Drug-Out / Leave-Cell-Out baseline results | ⏳ In progress | These are the scientifically meaningful splits — random split r inflated by drug memorization |
+| Random split r inflated | ⚠️ Known issue | All models (incl. Ridge r=0.864) benefit from drug identity leakage in random split; not a fair measure of generalization |
+| "Digital twin" claim | ⚠️ Terminology | Model is a QSAR predictor, not a patient-specific digital twin. Full personalisation requires patient sequencing data |
+| No statistical significance testing | ❌ Missing | No confidence intervals or permutation tests on r values |
+| CCLE vs. PDX generalization | ❌ Missing | All results are in-distribution CCLE; no external validation dataset used |
 
 ---
 
