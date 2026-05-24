@@ -63,57 +63,125 @@ Six prioritised fixes (P1–P6) implemented, plus P7 (OOM fixes):
 
 ---
 
-## First Real Baseline Results (24 May 2026, Random Split)
+## Complete Results — Baselines vs Bi-Int (24 May 2026)
 
-These are the **first valid quantitative comparisons** between classical ML and the Bi-Int model on real CCLE data with corrected drug features and omics alignment.
+These are the **first complete quantitative comparisons** between classical ML and Bi-Int on real CCLE data, evaluated across three scientifically distinct split strategies.
 
-**Random split (80/20) — drug identity memorisation:**
+### Data configuration
+
+- **CCLE Broad 2019:** 201/266 drugs with SMILES (75.6%), 647 cell lines, 103,477 IC50 triplets
+- **Subsampling:** 20,000 triplets (RAM constraint, seed=42) from 103,477
+- **Features (baselines):** ECFP4 Morgan r=2 (2048 bits) + GEx (978 genes) + CNA (426 genes) = **4,197 dims**
+- **IC50 transform:** log1p → z-score normalisation (mean=0, std=1)
+
+---
+
+### Split 1 — Random 80/20 (drug identity memorisation test)
+
+*The same drug appears in both train and val. High r here reflects memorisation, not generalisation.*
 
 | Model | RMSE | R² | Pearson r | Spearman r |
 |-------|------|-----|-----------|------------|
 | Ridge (ECFP4+omics) | 0.508 | 0.746 | 0.864 | 0.859 |
 | Ridge (omics only) | 0.971 | 0.070 | 0.265 | 0.254 |
 | RF (50 trees) | 0.824 | 0.331 | 0.584 | 0.616 |
-| MLP (512→256→128) | **0.477** | **0.776** | **0.881** | 0.878 |
+| MLP (256→128) | **0.477** | **0.776** | **0.881** | 0.878 |
 | XGBoost (100 trees) | 0.548 | 0.704 | 0.849 | 0.846 |
-| **Bi-Int (epoch 1)** | 0.854 | — | 0.506 | — |
-| **Bi-Int (epoch 2)** | 0.899 | — | 0.631 | — |
-| **Bi-Int (epoch 3)** | 0.594 | — | 0.791 | — |
-| **Bi-Int (epoch 4)** | **0.588** | — | **0.811** | — |
+| **Bi-Int epoch 1** | 0.854 | — | 0.506 | — |
+| **Bi-Int epoch 2** | 0.899 | — | 0.631 | — |
+| **Bi-Int epoch 3** | 0.594 | — | 0.791 | — |
+| **Bi-Int epoch 4** | **0.588** | — | **0.811** | — |
 
-**Leave-Drug-Out (30 unseen drugs — molecular generalisation test):**
+**Bi-Int convergence:** r = 0.506 → 0.811 over 4 epochs. Gradient norm: 26.15 → 9.40 (−64%). Competitive with Ridge and MLP after 4 epochs. Epoch 5 terminated by GPU OOM (SelectV2, 17.6/20.5 GB VRAM).
 
-*Split after 20k subsampling: 171 train drugs | 30 val drugs (16,832 train | 3,168 val triplets)*
+---
 
-| Model | RMSE | R² | Pearson r | Spearman r |
-|-------|------|-----|-----------|------------|
-| Ridge (ECFP4+omics) | 1.033 | −0.065 | 0.286 | 0.215 |
-| Ridge (omics only) | 0.956 | +0.087 | 0.295 | 0.279 |
-| RF (50 trees) | 1.015 | −0.029 | 0.174 | 0.101 |
-| MLP (256→128) | 0.975 | +0.050 | 0.349 | 0.329 |
-| XGBoost (100 trees) | 0.938 | +0.121 | **0.367** | 0.334 |
-| **Bi-Int (epoch 2, best)** | 0.983 | — | **0.316** | — |
+### Split 2 — Leave-Drug-Out (molecular generalisation test)
 
-**Leave-Cell-Out (129 unseen cell lines — transcriptomic generalisation test):**
+*30 drugs are entirely held out of training. This tests whether the model can predict IC50 for chemically novel molecules — the clinically relevant scenario.*
 
-| Model | RMSE | R² | Pearson r | Spearman r |
-|-------|------|-----|-----------|------------|
-| Ridge (ECFP4+omics) | 0.601 | 0.642 | 0.803 | 0.797 |
-| Ridge (omics only) | 1.020 | −0.029 | 0.095 | 0.099 |
-| RF (50 trees) | 0.826 | 0.326 | 0.579 | 0.593 |
-| MLP (256→128) | 0.817 | 0.340 | 0.676 | 0.788 |
-| XGBoost (100 trees) | **0.580** | **0.668** | **0.824** | 0.816 |
-| **Bi-Int** | — | — | *run pending* | — |
+*171 train drugs | 30 val drugs → 16,832 train triplets | 3,168 val triplets (after 20k subsampling)*
+
+| Model | RMSE | R² | Pearson r | Spearman r | Drop vs Random |
+|-------|------|-----|-----------|------------|---------------|
+| Ridge (ECFP4+omics) | 1.033 | −0.065 | 0.286 | 0.215 | **−0.578** |
+| Ridge (omics only) | 0.956 | +0.087 | 0.295 | 0.279 | +0.030 |
+| RF (50 trees) | 1.015 | −0.029 | 0.174 | 0.101 | −0.410 |
+| MLP (256→128) | 0.975 | +0.050 | 0.349 | 0.329 | −0.532 |
+| XGBoost (100 trees) | 0.938 | +0.121 | **0.367** | 0.334 | −0.482 |
+| **Bi-Int epoch 2 (best)** | 0.983 | — | **0.316** | — | — |
+
+**Bi-Int LDO convergence:**
+
+| Epoch | Train RMSE | Val RMSE | Pearson r |
+|-------|-----------|---------|-----------|
+| 1 | 0.946 | 0.998 | 0.253 |
+| **2** | 0.746 | **0.983** | **0.316** |
+| 3 | 0.647 | 1.158 | 0.209 |
+| 4 | 0.618 | 1.144 | 0.257 |
+
+Overfitting from epoch 3: val RMSE rises 0.983 → 1.158 while train RMSE continues falling. Bi-Int epoch 2 (r=0.316) is 0.051 below XGBoost (r=0.367).
+
+---
+
+### Split 3 — Leave-Cell-Out (transcriptomic generalisation test)
+
+*129 cell lines entirely held out. Tests whether the model generalises to cell lines with unseen transcriptomic profiles.*
+
+| Model | RMSE | R² | Pearson r | Spearman r | Drop vs Random |
+|-------|------|-----|-----------|------------|---------------|
+| Ridge (ECFP4+omics) | 0.601 | 0.642 | 0.803 | 0.797 | −0.061 |
+| Ridge (omics only) | 1.020 | −0.029 | 0.095 | 0.099 | −0.170 |
+| RF (50 trees) | 0.826 | 0.326 | 0.579 | 0.593 | −0.005 |
+| MLP (256→128) | 0.817 | 0.340 | 0.676 | 0.788 | −0.205 |
+| XGBoost (100 trees) | **0.580** | **0.668** | **0.824** | 0.816 | **−0.025** |
+| **Bi-Int** | — | — | *run pending* | — | — |
+
+---
+
+### Summary — All Models × All Splits
+
+| Model | Random r | LDO r | LCO r | Most stable |
+|-------|---------|-------|-------|------------|
+| Ridge (ECFP4+omics) | 0.864 | 0.286 | 0.803 | LCO |
+| Ridge (omics only) | 0.265 | 0.295 | 0.095 | LDO (marginal) |
+| RF (50 trees) | 0.584 | 0.174 | 0.579 | LCO ≈ Random |
+| MLP (256→128) | **0.881** | 0.349 | 0.676 | Random |
+| XGBoost (100 trees) | 0.849 | **0.367** | **0.824** | **Most stable across all splits** |
+| **Bi-Int (best epoch)** | **0.811** | **0.316** | *pending* | — |
+
+---
 
 ### Scientific interpretation
 
-**Key finding — memorisation artefact confirmed empirically:**
+**1. The drug memorisation artefact is empirically confirmed.**  
+All models with ECFP4 fingerprints score r = 0.58–0.88 on random split, then collapse in LDO (r = 0.17–0.37). Ridge R²=−0.065 in LDO — worse than predicting the global mean. ECFP4 encodes drug *identity* (bit vector), not structural *similarity*; two similar molecules can have near-orthogonal ECFP4 vectors. This is a well-known limitation in computational pharmacogenomics.
 
-Random split r values (0.58–0.88) are inflated by drug identity memorisation. The same models drop sharply in Leave-Drug-Out (r = 0.17–0.37), confirming the artefact. Ridge R²=−0.065 in LDO means it performs *worse* than predicting the mean for unseen drugs.
+**2. XGBoost is the best classical model for out-of-distribution generalisation.**  
+r = 0.367 (LDO) and r = 0.824 (LCO) — the only model maintaining reasonable performance across all three splits. Gradient boosting trees capture non-linear omics × fingerprint interactions that partially generalise.
 
-**Leave-Cell-Out is different:** XGBoost stays at r=0.824 (only −0.025 from random), because ECFP4 drug identity is still available. The omics signal for new cell lines generalises through the drug × omics interaction terms learned by XGBoost.
+**3. Leave-Cell-Out is much easier than Leave-Drug-Out for classical models.**  
+Ridge stays at r=0.803 in LCO (−0.061 vs random) because all drug ECFP4 vectors are still available. The transcriptomic space is smoother and more continuous than the discrete chemical space of fingerprints.
 
-**Bi-Int LDO result (epoch 2, r=0.316):** Bi-Int with 4 epochs does not surpass XGBoost (r=0.367) on Leave-Drug-Out. Overfitting is visible from epoch 3 (val RMSE rises 0.983 → 1.158). The GNN pre-trained on ChEMBL has the theoretical capacity to interpolate unseen drug scaffolds — but 20k subsampled triplets and 4 epochs appear insufficient to overcome the sparsity of chemical space coverage. More epochs with early stopping and the full 103k triplets (requires GPU ≥40 GB) are the natural next step.
+**4. Bi-Int converges strongly on random split (r=0.811, 4 epochs), but does not yet outperform XGBoost on LDO (r=0.316 vs 0.367).**  
+The pre-trained GNN has the theoretical capacity to interpolate unseen drug scaffolds (a capability absent from fixed ECFP4), but the 20k subsampled triplets (83% of the data discarded) and 4 epochs with no early stopping are insufficient to fully exploit it. The open question is whether scaling to 103k triplets + early stopping would push Bi-Int above the XGBoost LDO ceiling.
+
+---
+
+### Next steps to answer the open question
+
+```
+Priority 1:  Re-run Bi-Int LDO with --early-stopping 3 (patience on val RMSE)
+             → quantify whether early stopping recovers from overfitting
+
+Priority 2:  Use full 103k triplets (gradient checkpointing or GPU ≥40 GB)
+             → test whether data scale is the bottleneck for LDO generalisation
+
+Priority 3:  Run Bi-Int Leave-Cell-Out to complete the comparison grid
+
+Priority 4:  Re-run baselines with mutations (735 genes, fixed in code)
+             → test whether mutation features improve LDO for classical models
+```
 
 ---
 
@@ -121,12 +189,16 @@ Random split r values (0.58–0.88) are inflated by drug identity memorisation. 
 
 | Limitation | Status | Scientific impact |
 |-----------|--------|------------------|
-| 65/266 drugs missing SMILES | ❌ Pending | 24% of CCLE drugs excluded from training; PubChem found no match after 3-level lookup (pkl + CSV + REST) |
-| Mutations file parsing error in baselines | ❌ Bug | `data_mutations.txt` has variable columns → `pd.read_csv` fails without `on_bad_lines='skip'`. Fixed in code, baseline re-run needed |
-| BiInt random split (4 epochs) | ✅ r=0.811 epoch 4 | OOM at epoch 5 (SelectV2 VRAM); competitive with Ridge on random split |
-| BiInt Leave-Drug-Out (4 epochs) | ⚠️ r=0.316 best (epoch 2) | Below XGBoost (r=0.367); overfitting from epoch 3; needs more data / epochs |
-| Bi-Int Leave-Cell-Out | ❌ Not yet run | Run pending |
-| Random split r inflated | ⚠️ Known issue | All models (incl. Ridge r=0.864) benefit from drug identity leakage in random split; not a fair measure of generalization |
+| 65/266 drugs missing SMILES | ❌ Pending | 24% of CCLE drugs excluded. PubChem 3-level lookup found no match — need ChEMBL synonym / CAS lookup |
+| 20k subsampling of 103k triplets | ⚠️ Active constraint | WSL2 32 GB RAM forces 80% data loss. Affects LDO diversity most severely. Needs gradient checkpointing or GPU ≥40 GB |
+| Bi-Int LDO below XGBoost | ⚠️ r=0.316 vs 0.367 | GNN pre-training not sufficient to beat ECFP4+XGBoost at current data scale. Not yet proven that ChEMBL pre-training adds value for LDO |
+| GPU OOM at epoch 5 | ⚠️ Recurring | SelectV2 (tf.maximum in VAE loss) exceeds 20.5 GB VRAM at XLA recompilation. Fix: batch_size=4 or gradient checkpointing |
+| Mutations not used in baselines | ❌ Bug fixed, re-run needed | `on_bad_lines='skip'` fix in code but baselines were run without the 735 mutation features |
+| Bi-Int Leave-Cell-Out | ❌ Not yet run | LCO comparison grid incomplete |
+| No confidence intervals on r | ❌ Missing | Bootstrap CI required for any publication — r=0.316 ± ? vs 0.367 ± ? |
+| No external validation (GDSC) | ❌ Missing | All metrics are in-distribution CCLE. Cross-dataset generalisation untested |
+| Random split r inflated | ⚠️ Known artefact | All r values (0.58–0.88) on random split include drug identity leakage. LDO/LCO are the scientifically meaningful splits |
+| "Digital twin" terminology | ⚠️ Aspirational | Model is a QSAR predictor on cancer cell lines. Full personalisation requires patient-specific sequencing data (TCGA/PDX) |
 | "Digital twin" claim | ⚠️ Terminology | Model is a QSAR predictor, not a patient-specific digital twin. Full personalisation requires patient sequencing data |
 | No statistical significance testing | ❌ Missing | No confidence intervals or permutation tests on r values |
 | CCLE vs. PDX generalization | ❌ Missing | All results are in-distribution CCLE; no external validation dataset used |
