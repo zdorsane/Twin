@@ -74,7 +74,8 @@ These are the **first valid quantitative comparisons** between classical ML and 
 | MLP (512→256→128) | **0.477** | **0.776** | **0.881** | 0.878 |
 | XGBoost (100 trees) | 0.548 | 0.704 | 0.849 | 0.846 |
 | **Bi-Int (epoch 1)** | 0.854 | — | 0.506 | — |
-| **Bi-Int (epoch 2)** | 0.899 | — | **0.631** | — |
+| **Bi-Int (epoch 2)** | 0.899 | — | 0.631 | — |
+| **Bi-Int (epoch 3)** | **0.594** | — | **0.791** | — |
 
 **Leave-Drug-Out (40 unseen drugs — molecular generalisation test):**
 
