@@ -71,7 +71,7 @@ These are the **first valid quantitative comparisons** between classical ML and 
 | Random Forest (50 trees) | ECFP4 + GEx + CNA | 0.824 | 0.331 | 0.584 | 0.616 |
 | MLP (512→256→128) | ECFP4 + GEx + CNA | 0.477 | 0.776 | **0.881** | 0.878 |
 | XGBoost (100 trees) | ECFP4 + GEx + CNA | 0.548 | 0.704 | 0.849 | 0.846 |
-| **Bi-Int (epoch 1)** | GNN + QuatVAE (GEx+CNA+Mut) | **0.846** | — | **0.492** | — |
+| **Bi-Int (epoch 1)** | GNN + QuatVAE (GEx+CNA+Mut) | **0.854** | — | **0.506** | — |
 
 **Split: Leave-Drug-Out and Leave-Cell-Out results in progress.**
 
