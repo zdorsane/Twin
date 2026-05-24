@@ -1684,6 +1684,8 @@ def load_ccle_real_data(
     # Per-drug: vectorised valid-cell lookup via numpy instead of .loc[] per cell
     samples_atoms, samples_adj, samples_gex, samples_mut, samples_cna, samples_ic50 = \
         [], [], [], [], [], []
+    samples_drug_ids = []   # track drug id per sample (for leave_drug_out split)
+    samples_cell_idx = []   # track cell index per sample (for leave_cell_out split)
 
     for drug_id in drug_ids:
         if drug_atom_feats[drug_id] is None:
@@ -1703,6 +1705,8 @@ def load_ccle_real_data(
             samples_mut.append(mut_mat[ci])
             samples_cna.append(cna_mat[ci])
             samples_ic50.append(float(log_vals[k]))
+            samples_drug_ids.append(drug_id)
+            samples_cell_idx.append(int(ci))
 
     n = len(samples_ic50)
     print(f"  Triplets (drogue, lignée, IC50) valides : {n:,}")
@@ -1714,12 +1718,14 @@ def load_ccle_real_data(
         rng_sub = np.random.default_rng(42)
         sub_idx = rng_sub.choice(n, size=20000, replace=False)
         sub_idx.sort()
-        samples_atoms = [samples_atoms[i] for i in sub_idx]
-        samples_adj   = [samples_adj[i]   for i in sub_idx]
-        samples_gex   = [samples_gex[i]   for i in sub_idx]
-        samples_mut   = [samples_mut[i]   for i in sub_idx]
-        samples_cna   = [samples_cna[i]   for i in sub_idx]
-        samples_ic50  = [samples_ic50[i]  for i in sub_idx]
+        samples_atoms    = [samples_atoms[i]    for i in sub_idx]
+        samples_adj      = [samples_adj[i]      for i in sub_idx]
+        samples_gex      = [samples_gex[i]      for i in sub_idx]
+        samples_mut      = [samples_mut[i]      for i in sub_idx]
+        samples_cna      = [samples_cna[i]      for i in sub_idx]
+        samples_ic50     = [samples_ic50[i]     for i in sub_idx]
+        samples_drug_ids = [samples_drug_ids[i] for i in sub_idx]
+        samples_cell_idx = [samples_cell_idx[i] for i in sub_idx]
         n = 20000
         print(f"  [RAM] Sous-échantillonnage → {n:,} triplets (WSL2 32GB limit)")
 
@@ -1751,33 +1757,25 @@ def load_ccle_real_data(
     active_drug_ids = [d for d in drug_ids if drug_atom_feats[d] is not None]
 
     if split_mode == 'leave_drug_out':
-        sorted_drugs = sorted(set(active_drug_ids))
+        # Use per-sample drug IDs (already subsampled, length == n)
+        sample_drug_ids_arr = np.array(samples_drug_ids)
+        sorted_drugs = sorted(set(sample_drug_ids_arr))
         n_val_drugs  = max(1, int(len(sorted_drugs) * val_split))
         train_drug_set = set(sorted_drugs[:-n_val_drugs])
         val_drug_set   = set(sorted_drugs[-n_val_drugs:])
-        sample_drug_ids = []
-        for drug_id in active_drug_ids:
-            row = ic50_np[drug_row[drug_id]]
-            valid_ci = np.where(np.isfinite(row) & (row > 0))[0]
-            sample_drug_ids.extend([drug_id] * len(valid_ci))
-        sample_drug_ids = np.array(sample_drug_ids)
-        tr = np.where(np.isin(sample_drug_ids, list(train_drug_set)))[0]
-        va = np.where(np.isin(sample_drug_ids, list(val_drug_set)))[0]
+        tr = np.where(np.isin(sample_drug_ids_arr, list(train_drug_set)))[0]
+        va = np.where(np.isin(sample_drug_ids_arr, list(val_drug_set)))[0]
         print(f"  Leave-drug-out split : {len(train_drug_set)} train drugs | {len(val_drug_set)} val drugs")
 
     elif split_mode == 'leave_cell_out':
+        # Use per-sample cell indices (already subsampled, length == n)
+        sample_cell_names = np.array([common_cells[ci] for ci in samples_cell_idx])
         sorted_cells = sorted(common_cells)
         n_val_cells  = max(1, int(len(sorted_cells) * val_split))
         train_cell_set = set(sorted_cells[:-n_val_cells])
         val_cell_set   = set(sorted_cells[-n_val_cells:])
-        sample_cells = []
-        for drug_id in active_drug_ids:
-            row = ic50_np[drug_row[drug_id]]
-            valid_ci = np.where(np.isfinite(row) & (row > 0))[0]
-            sample_cells.extend([common_cells[ci] for ci in valid_ci])
-        sample_cells = np.array(sample_cells)
-        tr = np.where(np.isin(sample_cells, list(train_cell_set)))[0]
-        va = np.where(np.isin(sample_cells, list(val_cell_set)))[0]
+        tr = np.where(np.isin(sample_cell_names, list(train_cell_set)))[0]
+        va = np.where(np.isin(sample_cell_names, list(val_cell_set)))[0]
         print(f"  Leave-cell-out split : {len(train_cell_set)} train cells | {len(val_cell_set)} val cells")
 
     else:  # 'random'
