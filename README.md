@@ -64,26 +64,48 @@ Six prioritised fixes (P1–P6) implemented, plus P7 (OOM fixes):
 
 These are the **first valid quantitative comparisons** between classical ML and the Bi-Int model on real CCLE data with corrected drug features and omics alignment.
 
-| Model | Features | RMSE | R² | Pearson r | Spearman r |
-|-------|----------|------|-----|-----------|------------|
-| Ridge regression | ECFP4 + GEx + CNA | 0.508 | 0.746 | **0.864** | 0.859 |
-| Ridge regression | GEx + CNA only | 0.971 | 0.070 | 0.265 | 0.254 |
-| Random Forest (50 trees) | ECFP4 + GEx + CNA | 0.824 | 0.331 | 0.584 | 0.616 |
-| MLP (512→256→128) | ECFP4 + GEx + CNA | 0.477 | 0.776 | **0.881** | 0.878 |
-| XGBoost (100 trees) | ECFP4 + GEx + CNA | 0.548 | 0.704 | 0.849 | 0.846 |
-| **Bi-Int (epoch 1)** | GNN + QuatVAE (GEx+CNA+Mut) | **0.854** | — | **0.506** | — |
+**Random split (80/20) — drug identity memorisation:**
 
-**Split: Leave-Drug-Out and Leave-Cell-Out results in progress.**
+| Model | RMSE | R² | Pearson r | Spearman r |
+|-------|------|-----|-----------|------------|
+| Ridge (ECFP4+omics) | 0.508 | 0.746 | 0.864 | 0.859 |
+| Ridge (omics only) | 0.971 | 0.070 | 0.265 | 0.254 |
+| RF (50 trees) | 0.824 | 0.331 | 0.584 | 0.616 |
+| MLP (512→256→128) | **0.477** | **0.776** | **0.881** | 0.878 |
+| XGBoost (100 trees) | 0.548 | 0.704 | 0.849 | 0.846 |
+| **Bi-Int (epoch 1)** | 0.854 | — | 0.506 | — |
+
+**Leave-Drug-Out (40 unseen drugs — molecular generalisation test):**
+
+| Model | RMSE | R² | Pearson r | Spearman r |
+|-------|------|-----|-----------|------------|
+| Ridge (ECFP4+omics) | 1.033 | −0.065 | 0.286 | 0.215 |
+| Ridge (omics only) | 0.956 | +0.087 | 0.295 | 0.279 |
+| RF (50 trees) | 1.015 | −0.029 | 0.174 | 0.101 |
+| MLP (256→128) | 0.975 | +0.050 | 0.349 | 0.329 |
+| XGBoost (100 trees) | 0.938 | +0.121 | **0.367** | 0.334 |
+| **Bi-Int** | — | — | *run in progress* | — |
+
+**Leave-Cell-Out (129 unseen cell lines — transcriptomic generalisation test):**
+
+| Model | RMSE | R² | Pearson r | Spearman r |
+|-------|------|-----|-----------|------------|
+| Ridge (ECFP4+omics) | 0.601 | 0.642 | 0.803 | 0.797 |
+| Ridge (omics only) | 1.020 | −0.029 | 0.095 | 0.099 |
+| RF (50 trees) | 0.826 | 0.326 | 0.579 | 0.593 |
+| MLP (256→128) | 0.817 | 0.340 | 0.676 | 0.788 |
+| XGBoost (100 trees) | **0.580** | **0.668** | **0.824** | 0.816 |
+| **Bi-Int** | — | — | *run in progress* | — |
 
 ### Scientific interpretation of Random Split results
 
-**Why Ridge r=0.864 on a "simple" model?** This is a known property of CCLE: when drug identity is encoded as a fixed ECFP4 fingerprint, a linear model can memorize drug-specific mean IC50 values (some drugs are universally potent, others universally weak). The high r on random split reflects this memorization, not genuine structure–activity learning.
+**Key finding — memorisation artefact confirmed empirically:**
 
-**The critical test is Leave-Drug-Out:** Here, the model must predict IC50 for drug scaffolds never seen during training. Ridge and RF are expected to drop sharply (r < 0.3) because they cannot generalize molecular structure knowledge. Bi-Int, with its GNN encoder pre-trained on 100k ChEMBL molecules, should generalize better.
+Random split r values (0.58–0.88) are inflated by drug identity memorisation. The same models drop sharply in Leave-Drug-Out (r = 0.17–0.37), confirming the artefact. Ridge R²=−0.065 in LDO means it performs *worse* than predicting the mean for unseen drugs.
 
-**Bi-Int epoch 1 r=0.492 on random split:** This is below Ridge (0.864) after only 1 epoch — expected, since the model hasn't converged yet and the GNN encoder is still adapting from the ChEMBL pre-training domain (property prediction) to the CCLE domain (IC50 prediction). Pearson r is expected to improve substantially over epochs 2–5.
+**Leave-Cell-Out is different:** XGBoost stays at r=0.824 (only −0.025 from random), because ECFP4 drug identity is still available. The omics signal for new cell lines generalises through the drug × omics interaction terms learned by XGBoost.
 
-**Ridge (omics only) r=0.265:** When ECFP4 fingerprints are removed, a linear model on omics alone performs near-random. This confirms that the molecular structure signal is the dominant predictor in the random split — which is consistent with the memorization hypothesis above.
+**Bi-Int epoch 1 r=0.506 (random split, not converged):** The GNN encoder trained on 100k ChEMBL structures should yield competitive LDO performance once converged (epochs 2–5), as it can encode structural similarity between seen and unseen drug scaffolds — a capability absent from fixed ECFP4 fingerprints.
 
 ---
 

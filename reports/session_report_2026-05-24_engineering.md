@@ -167,24 +167,45 @@ return ds.shuffle(...).batch(batch_size, drop_remainder=True).prefetch(tf.data.A
 | Ridge (ECFP4+omics) | 0.601 | 0.642 | **0.803** | 0.797 | −0.061 |
 | Ridge (omics seul) | 1.020 | −0.029 | 0.095 | 0.099 | −0.170 |
 | RF (ECFP4+omics) | 0.826 | 0.326 | 0.579 | 0.593 | −0.005 |
-| MLP (256→128) | *en cours* | | | | |
-| XGBoost (100 arbres) | *en cours* | | | | |
+| MLP (256→128) | 0.817 | 0.340 | **0.676** | 0.788 | −0.205 |
+| XGBoost (100 arbres) | **0.580** | **0.668** | **0.824** | 0.816 | −0.025 |
 
-**Observation clé :** Ridge conserve r=0.803 en LCO (vs 0.864 en random, seulement −0.061). Contrairement à LDO, en Leave-Cell-Out le modèle connaît toutes les drogues — ECFP4 encode l'identité drogue qui est disponible. La chute est faible car la drogue reste le facteur principal de prédiction.
-
-Ridge (omics seul) r=0.095 en LCO : sans les omiques d'une cellule inconnue, impossible de prédire. Confirme que les omiques sont le signal cellulaire, pas une généralisation de structure moléculaire.
+**Observations clés :**
+- **XGBoost conserve r=0.824 en LCO** (vs 0.849 random, −0.025 seulement) — XGBoost capture des patterns omiques non-linéaires qui généralisent bien aux nouvelles lignées.
+- **Ridge ECFP4+omics r=0.803** : chute modérée car en LCO le modèle connaît toutes les drogues. ECFP4 encode l'identité drogue disponible.
+- **Ridge omics seul r=0.095** : sans omiques d'une cellule inconnue, impossible de prédire. Confirme que les omiques sont le signal cellulaire dominant en LCO.
+- **MLP r=0.676** : dégradation plus forte — le MLP mémorise davantage les patterns cellulaires vus en entraînement.
 
 ---
 
-### 5.4 Synthèse : Pourquoi Ce Tableau Est Scientifiquement Important
+### 5.4 Tableau de Synthèse Complet — Tous Modèles × Tous Splits
+
+| Modèle | Random r | LDO r | LCO r | Meilleur split |
+|--------|---------|-------|-------|---------------|
+| Ridge (ECFP4+omics) | 0.864 | 0.286 | 0.803 | Random / LCO |
+| Ridge (omics seul) | 0.265 | 0.295 | 0.095 | LDO (légèrement) |
+| RF (ECFP4+omics) | 0.584 | 0.174 | 0.579 | Random ≈ LCO |
+| MLP (256→128) | **0.881** | 0.349 | 0.676 | Random |
+| XGBoost (100 arbres) | 0.849 | **0.367** | **0.824** | LCO (stable) |
+| **Bi-Int epoch 1** | 0.506 | *à venir* | *à venir* | *convergence en cours* |
+
+### 5.5 Pourquoi Ce Tableau Est Scientifiquement Important
 
 ```
-Split aléatoire     → mesure la mémorisation (tous modèles r > 0.84)
-Leave-Drug-Out      → mesure la généralisation moléculaire (Ridge chute à r = 0.29)
-Leave-Cell-Out      → mesure la généralisation transcriptomique (en cours)
+Split aléatoire  → mesure la mémorisation drogue (tous modèles r > 0.58)
+Leave-Drug-Out   → mesure la généralisation moléculaire (Ridge chute à r=0.29)
+Leave-Cell-Out   → mesure la généralisation transcriptomique (XGB stable à r=0.82)
 ```
 
-Un modèle utile cliniquement doit performer en **Leave-Drug-Out** (prédire la réponse d'un nouveau médicament en développement) et en **Leave-Cell-Out** (prédire la sensibilité d'un nouveau patient). C'est pourquoi ces deux splits sont les métriques scientifiquement significatives, et non le split aléatoire.
+**Pattern observé :** Trois comportements distincts émergent :
+
+1. **Ridge ECFP4+omics** : fort en Random et LCO (r>0.80), s'effondre en LDO (r=0.29). Mémorise parfaitement l'identité drogue et le profil cellulaire, ne généralise pas les structures moléculaires.
+
+2. **XGBoost** : le modèle le plus stable — r=0.849 → 0.367 → 0.824. Capture des interactions non-linéaires omics×drogue qui généralisent bien en LCO. En LDO, légèrement meilleur que Ridge car les arbres peuvent interpoler entre fingerprints similaires.
+
+3. **RF** : médiocre partout sauf LCO. 50 arbres insuffisants sur 4197 features — underfitting.
+
+**Position de Bi-Int :** Après convergence (epochs 2–5), la valeur ajoutée du GNN se mesurera en LDO. Si Bi-Int dépasse XGBoost (r=0.367) en LDO tout en maintenant des performances compétitives en LCO, le pré-entraînement ChEMBL démontre une capacité d'interpolation moléculaire impossible avec des fingerprints fixes.
 
 ---
 
