@@ -16,10 +16,11 @@
 | ChEMBL GNN pre-training | ✅ Complete | Val RMSE = 0.2187 (epoch 9/10), val loss = 0.0491 |
 | CCLE data loading (P1–P3 fixed) | ✅ Complete | 647 cells, 201/266 drugs with SMILES, 103,477 triplets |
 | Omics NPZ cache | ✅ Complete | `omics_cache_gex978_cna426.npz` — instant reload |
-| BiInt training (corrected data) | ⏳ In progress | **Epoch 1: val RMSE = 0.846, Pearson r = 0.492** |
-| Baseline models (Random split) | ✅ **NEW — first real results** | Ridge r=0.864, MLP r=0.881, XGB r=0.849 |
-| Baseline models (Leave-Drug-Out) | ⏳ In progress | Results pending |
-| Baseline models (Leave-Cell-Out) | ⏳ In progress | Results pending |
+| BiInt training — Random split | ✅ **Complete** | **Epoch 4: val RMSE=0.588, Pearson r=0.811** (OOM at epoch 5) |
+| BiInt training — Leave-Drug-Out | ✅ **NEW** | **Best r=0.316 (epoch 2), below XGBoost r=0.367** |
+| Baseline models (Random split) | ✅ Complete | Ridge r=0.864, MLP r=0.881, XGB r=0.849 |
+| Baseline models (Leave-Drug-Out) | ✅ Complete | XGB r=0.367 (best), Ridge r=0.286 |
+| Baseline models (Leave-Cell-Out) | ✅ Complete | XGB r=0.824 (best), Ridge r=0.803 |
 | BRICS-DQN generation | ✅ Complete | Best reward R=6.124, validity=60.5%, 5000 episodes |
 | Repo cleanup | ✅ **NEW** | `dqn_weights_*/`, `logs/`, weight files excluded from git |
 | "Digital twin" terminology | ✅ **NEW** | Reformulated as multimodal QSAR + honest note added |
@@ -48,7 +49,7 @@ Six prioritised fixes (P1–P6) implemented, plus P7 (OOM fixes):
 
 ---
 
-### Fixes applied 24 May 2026 (P8–P9)
+### Fixes applied 24 May 2026 (P8–P10)
 
 **P8 — `leave_drug_out` / `leave_cell_out` NameError bug:** Both split modes referenced `ic50_df.loc[]` in an O(n²) loop (201 drugs × 647 cells = 130k `.loc[]` calls) *after* `del ic50_df`. Replaced with vectorised `ic50_np[drug_row[drug_id]]` lookup — O(n) instead of O(n²). This caused the training process to appear "frozen" for 3+ days.
 
@@ -57,6 +58,8 @@ Six prioritised fixes (P1–P6) implemented, plus P7 (OOM fixes):
 **Repo cleanup:** `.gitignore` updated to exclude `dqn_weights_*/`, `pretrained_weights/`, `logs/`, `run_log.txt`, `*.keras`. These are large binary/runtime files that do not belong in version control.
 
 **Terminology fix:** README header reformulated from "Digital Twin" to "Multimodal Drug Response Predictor". Added honest note: the term "digital twin" is aspirational — the model is a multimodal QSAR predictor; full personalisation would require patient-specific sequencing.
+
+**P10 — IndexError in LDO/LCO splits after subsampling (commit `77716ab`):** Split index arrays were computed over the full 103k-triplet list *after* data had been subsampled to 20k, producing out-of-bounds indices (e.g. index 20000 for a size-20000 array). Fixed by tracking `drug_id` and `cell_idx` per sample during the build loop, subsampling these labels together with the data, and deriving split indices from the already-subsampled labels.
 
 ---
 
@@ -78,7 +81,9 @@ These are the **first valid quantitative comparisons** between classical ML and 
 | **Bi-Int (epoch 3)** | 0.594 | — | 0.791 | — |
 | **Bi-Int (epoch 4)** | **0.588** | — | **0.811** | — |
 
-**Leave-Drug-Out (40 unseen drugs — molecular generalisation test):**
+**Leave-Drug-Out (30 unseen drugs — molecular generalisation test):**
+
+*Split after 20k subsampling: 171 train drugs | 30 val drugs (16,832 train | 3,168 val triplets)*
 
 | Model | RMSE | R² | Pearson r | Spearman r |
 |-------|------|-----|-----------|------------|
@@ -87,7 +92,7 @@ These are the **first valid quantitative comparisons** between classical ML and 
 | RF (50 trees) | 1.015 | −0.029 | 0.174 | 0.101 |
 | MLP (256→128) | 0.975 | +0.050 | 0.349 | 0.329 |
 | XGBoost (100 trees) | 0.938 | +0.121 | **0.367** | 0.334 |
-| **Bi-Int** | — | — | *run in progress* | — |
+| **Bi-Int (epoch 2, best)** | 0.983 | — | **0.316** | — |
 
 **Leave-Cell-Out (129 unseen cell lines — transcriptomic generalisation test):**
 
@@ -98,9 +103,9 @@ These are the **first valid quantitative comparisons** between classical ML and 
 | RF (50 trees) | 0.826 | 0.326 | 0.579 | 0.593 |
 | MLP (256→128) | 0.817 | 0.340 | 0.676 | 0.788 |
 | XGBoost (100 trees) | **0.580** | **0.668** | **0.824** | 0.816 |
-| **Bi-Int** | — | — | *run in progress* | — |
+| **Bi-Int** | — | — | *run pending* | — |
 
-### Scientific interpretation of Random Split results
+### Scientific interpretation
 
 **Key finding — memorisation artefact confirmed empirically:**
 
@@ -108,7 +113,7 @@ Random split r values (0.58–0.88) are inflated by drug identity memorisation. 
 
 **Leave-Cell-Out is different:** XGBoost stays at r=0.824 (only −0.025 from random), because ECFP4 drug identity is still available. The omics signal for new cell lines generalises through the drug × omics interaction terms learned by XGBoost.
 
-**Bi-Int epoch 1 r=0.506 (random split, not converged):** The GNN encoder trained on 100k ChEMBL structures should yield competitive LDO performance once converged (epochs 2–5), as it can encode structural similarity between seen and unseen drug scaffolds — a capability absent from fixed ECFP4 fingerprints.
+**Bi-Int LDO result (epoch 2, r=0.316):** Bi-Int with 4 epochs does not surpass XGBoost (r=0.367) on Leave-Drug-Out. Overfitting is visible from epoch 3 (val RMSE rises 0.983 → 1.158). The GNN pre-trained on ChEMBL has the theoretical capacity to interpolate unseen drug scaffolds — but 20k subsampled triplets and 4 epochs appear insufficient to overcome the sparsity of chemical space coverage. More epochs with early stopping and the full 103k triplets (requires GPU ≥40 GB) are the natural next step.
 
 ---
 
@@ -118,8 +123,9 @@ Random split r values (0.58–0.88) are inflated by drug identity memorisation. 
 |-----------|--------|------------------|
 | 65/266 drugs missing SMILES | ❌ Pending | 24% of CCLE drugs excluded from training; PubChem found no match after 3-level lookup (pkl + CSV + REST) |
 | Mutations file parsing error in baselines | ❌ Bug | `data_mutations.txt` has variable columns → `pd.read_csv` fails without `on_bad_lines='skip'`. Fixed in code, baseline re-run needed |
-| BiInt training not converged | ⏳ In progress | Only epoch 1 completed (r=0.492); 5-epoch run in progress on GPU |
-| Leave-Drug-Out / Leave-Cell-Out baseline results | ⏳ In progress | These are the scientifically meaningful splits — random split r inflated by drug memorization |
+| BiInt random split (4 epochs) | ✅ r=0.811 epoch 4 | OOM at epoch 5 (SelectV2 VRAM); competitive with Ridge on random split |
+| BiInt Leave-Drug-Out (4 epochs) | ⚠️ r=0.316 best (epoch 2) | Below XGBoost (r=0.367); overfitting from epoch 3; needs more data / epochs |
+| Bi-Int Leave-Cell-Out | ❌ Not yet run | Run pending |
 | Random split r inflated | ⚠️ Known issue | All models (incl. Ridge r=0.864) benefit from drug identity leakage in random split; not a fair measure of generalization |
 | "Digital twin" claim | ⚠️ Terminology | Model is a QSAR predictor, not a patient-specific digital twin. Full personalisation requires patient sequencing data |
 | No statistical significance testing | ❌ Missing | No confidence intervals or permutation tests on r values |
