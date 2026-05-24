@@ -160,7 +160,19 @@ return ds.shuffle(...).batch(batch_size, drop_remainder=True).prefetch(tf.data.A
 ### 5.3 Leave-Cell-Out (LCO)
 
 *129 lignées cellulaires entièrement absentes de l'entraînement*  
-*En cours au moment de la rédaction de ce rapport.*
+*Train : 82 965 triplets | Val : 20 512 triplets*
+
+| Modèle | RMSE | R² | Pearson r | Spearman r | Δr vs Random |
+|--------|------|-----|-----------|------------|-------------|
+| Ridge (ECFP4+omics) | 0.601 | 0.642 | **0.803** | 0.797 | −0.061 |
+| Ridge (omics seul) | 1.020 | −0.029 | 0.095 | 0.099 | −0.170 |
+| RF (ECFP4+omics) | 0.826 | 0.326 | 0.579 | 0.593 | −0.005 |
+| MLP (256→128) | *en cours* | | | | |
+| XGBoost (100 arbres) | *en cours* | | | | |
+
+**Observation clé :** Ridge conserve r=0.803 en LCO (vs 0.864 en random, seulement −0.061). Contrairement à LDO, en Leave-Cell-Out le modèle connaît toutes les drogues — ECFP4 encode l'identité drogue qui est disponible. La chute est faible car la drogue reste le facteur principal de prédiction.
+
+Ridge (omics seul) r=0.095 en LCO : sans les omiques d'une cellule inconnue, impossible de prédire. Confirme que les omiques sont le signal cellulaire, pas une généralisation de structure moléculaire.
 
 ---
 

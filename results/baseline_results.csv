@@ -1,0 +1,14 @@
+Model,Split,RMSE,R2,Pearson_r,Spearman_r
+Ridge (ECFP4+omics),Random,0.5075,0.7459,0.8636,0.8592
+Ridge (omics only),Random,0.9707,0.0701,0.2650,0.2542
+RF (ECFP4+omics),Random,0.8235,0.3308,0.5836,0.6158
+MLP (ECFP4+omics),Random,0.4769,0.7756,0.8814,0.8781
+XGBoost (ECFP4+omics),Random,0.5478,0.7038,0.8494,0.8459
+Ridge (ECFP4+omics),Leave-Drug-Out,1.0325,-0.0649,0.2862,0.2152
+Ridge (omics only),Leave-Drug-Out,0.9564,0.0865,0.2951,0.2788
+RF (ECFP4+omics),Leave-Drug-Out,1.0149,-0.0287,0.1736,0.1014
+MLP (ECFP4+omics),Leave-Drug-Out,0.9753,0.0499,0.3494,0.3294
+XGBoost (ECFP4+omics),Leave-Drug-Out,0.9384,0.1205,0.3674,0.3344
+Ridge (ECFP4+omics),Leave-Cell-Out,0.6014,0.6423,0.8034,0.7969
+Ridge (omics only),Leave-Cell-Out,1.0199,-0.0285,0.0951,0.0993
+RF (ECFP4+omics),Leave-Cell-Out,0.8259,0.3255,0.5785,0.5933

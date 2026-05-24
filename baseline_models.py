@@ -225,7 +225,8 @@ def _load_mutations(mut_path: str, common_cells: list) -> np.ndarray:
 
     print(f"[baseline] Loading mutations from {path}...")
     try:
-        mut_df = pd.read_csv(path, sep="\t", low_memory=False)
+        mut_df = pd.read_csv(path, sep="\t", low_memory=False,
+                             comment="#", on_bad_lines="skip")
     except Exception as e:
         print(f"  [WARN] Could not read mutations file: {e}")
         return zeros
@@ -360,9 +361,9 @@ def run_baselines(ccle_dir: str, smiles_csv: str, mut_path: str, out_path: str):
             ),
             "MLP (ECFP4+omics)": (
                 MLPRegressor(
-                    hidden_layer_sizes=(512, 256, 128),
+                    hidden_layer_sizes=(256, 128),
                     activation="relu",
-                    max_iter=200,
+                    max_iter=100,
                     early_stopping=True,
                     validation_fraction=0.1,
                     random_state=RANDOM_SEED,
