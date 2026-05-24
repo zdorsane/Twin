@@ -353,7 +353,8 @@ def run_baselines(ccle_dir: str, smiles_csv: str, mut_path: str, out_path: str):
             "Ridge (omics only)":  (Ridge(alpha=1.0), X_omics),
             "RF (ECFP4+omics)": (
                 RandomForestRegressor(
-                    n_estimators=100, max_depth=10, n_jobs=-1, random_state=RANDOM_SEED
+                    n_estimators=50, max_depth=6, max_samples=0.5,
+                    n_jobs=-1, random_state=RANDOM_SEED
                 ),
                 X_full,
             ),
@@ -373,11 +374,11 @@ def run_baselines(ccle_dir: str, smiles_csv: str, mut_path: str, out_path: str):
         if HAS_XGB:
             models["XGBoost (ECFP4+omics)"] = (
                 xgb.XGBRegressor(
-                    n_estimators=300,
+                    n_estimators=100,
                     max_depth=6,
                     learning_rate=0.1,
-                    subsample=0.8,
-                    colsample_bytree=0.8,
+                    subsample=0.5,
+                    colsample_bytree=0.5,
                     n_jobs=-1,
                     random_state=RANDOM_SEED,
                     verbosity=0,

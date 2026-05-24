@@ -22,4 +22,13 @@ __pycache__/
 
 # Keras / HDF5 weight files (large binaries)
 *.h5
+*.keras
 weights/
+dqn_weights_*/
+pretrained_weights/
+
+# Logs directory (large, runtime-generated)
+logs/
+
+# Run logs
+run_log.txt
