@@ -1,7 +1,9 @@
-# Bi-Int Digital Twin — Multimodal AI Platform for Drug Discovery & IC50 Prediction
+# Bi-Int — Multimodal Drug Response Predictor & Molecular Generator
 
-> **A complete end-to-end pipeline for cancer drug response prediction and de novo molecular generation,
-> combining GNN pre-training on ChEMBL, multimodal omics VAE, and reinforcement learning — trained on real CCLE data.**
+> **An end-to-end pipeline for cancer drug response prediction (IC50) and de novo molecular generation,
+> combining GNN pre-training on ChEMBL, multimodal omics VAE (GEx + CNA + mutations), and BRICS-DQN reinforcement learning — trained on real CCLE data.**
+>
+> **Note on terminology:** This project is sometimes described as a "digital twin" in the literature sense of a patient-specific computational model. More precisely, it is a **multimodal QSAR model** that predicts drug response from omics profiles, with a generative component for molecule design. The term "digital twin" is aspirational — full personalisation would require patient-specific sequencing data beyond CCLE.
 
 ---
 
