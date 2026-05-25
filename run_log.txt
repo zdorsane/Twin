@@ -1,3 +1,87 @@
-[Thu May 21 15:33:07 WAT 2026] Starting fullPipeline.py -> logs/run_gpu_main
+[Sun May 24 10:33:11 WAT 2026] Starting fullPipeline.py -> logs/run_gpu_main
+[Sun May 24 10:34:12 WAT 2026] Starting fullPipeline.py -> logs/run_gpu_main
+[Sun May 24 10:34:22 WAT 2026] Exit: 0
 WARNING: All log messages before absl::InitializeLog() is called are written to STDERR
-I0000 00:00:1779374009.239145  143145 device_compiler.h:186] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+I0000 00:00:1779615305.819283  162847 device_compiler.h:186] Compiled cluster using XLA!  This line is logged at most once for the lifetime of the process.
+[GPU] 1 GPU(s) détecté(s) : ['/physical_device:GPU:0']
+========================================================================
+  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction
+========================================================================
+
+[Pre-trained] Loading ChEMBL pre-trained weights for drug encoder...
+[Pre-trained] Drug encoder initialized with ChEMBL pre-training.
+
+[Tokenizer] Saved parallel SMILES tokenizer to smiles_tokenizer.json
+[Tokenizer] Successfully loaded parallel SMILES tokenizer.
+
+[Model Built] IC50 output shape: (2,) | KL: 168.6002
+  Trainable parameters: 9,255,070
+
+[CCLE] Chargement des données réelles depuis Dataset/ccle_broad_2019 ...
+  IC50 : 266 drogues × 1068 lignées
+  [Cache] Chargement depuis Dataset/ccle_broad_2019/omics_cache_gex978_cna426.npz ...
+  GEx shape : (647, 978)  [depuis cache]
+  CNA shape : (647, 426)  [depuis cache]
+  Mutations : 647/647 lignées couvertes, 735 gènes (top: ['TTN', 'MUC16', 'MT-ND5', 'TP53', 'MT-CYB'])
+  Mutations shape : (647, 735)  sparsity=0.844  mean_mutations_per_cell=115.0
+  [P2-assert] mutation_matrix.shape[0] == expression_matrix.shape[0] → 647 == 647  ✓
+  [SMILES cache] 201 hits, 65 confirmed misses (266 total entries)
+  [PubChem] Querying 65 drugs missing from cache ...
+  [P1-check] Afatinib-1                          smiles='CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=74
+  [P1-check] Afatinib-2                          smiles='CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=74
+  [P1-check] Avagacestat-1                       smiles='C1=CC(=CC=C1S(=O)(=O)N(CC2=C(C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=62
+  [P1-check] Avagacestat-2                       smiles='C1=CC(=CC=C1S(=O)(=O)N(CC2=C(C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=62
+  [P1-check] AZD6482-1                           smiles='CC1=CN2C(=O)C=C(N=C2C(=C1)[C@@'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=57
+  Drogues avec vrais SMILES : 201/266 (75.6%)
+  Drogues exclues (pas de SMILES) : 65 → ['AKTinhibitorVIII-1', 'AKTinhibitorVIII-2', 'A-443654', 'A-770041', 'BAY-61-3606']...
+
+  ── IC50 Validation (Priority 3) ──────────────────────────────
+  Raw IC50 entries    : 172,102  (drugs × common cell lines)
+  Valid (>0, finite)  : 137,182
+  Removed NaN/inf     : 34,920  (20.3%)
+  Non-positive (<=0)  : 0  (clamped to 0.001 µM before log1p)
+  Outliers >100 µM    : 23,163  (16.9%)  — kept (high IC50 = resistant, biologically meaningful)
+  IC50 range          : 0.0001 — 400374.7 µM
+  Percentiles [1,50,99]: [4.00000e-03 1.32960e+01 8.92056e+02]
+  ─────────────────────────────────────────────────────────────
+  Triplets (drogue, lignée, IC50) valides : 103,477
+  [RAM] Sous-échantillonnage → 20,000 triplets (WSL2 32GB limit)
+  Post-log1p IC50     : min=0.0010  max=11.5957  mean=2.6541  std=1.8442
+  Post-zscore IC50    : min=-1.439  max=4.848  mean=-0.000  std=1.000
+  Train : 17,000 | Val : 3,000
+
+[Data] Données CCLE réelles chargées (20,000 triplets).
+
+[Training] Bi-Int Digital Twin on IC50 prediction (QSAR)...
+Epoch   1 | Train RMSE: 0.9595 | Val RMSE: 0.8542 | Pearson r: 0.5061 | CROSS_ENTROPY: 0.4758 | ‖∇‖=26.15
+Traceback (most recent call last):
+  File "/home/crbt/Twin/fullPipeline.py", line 2272, in <module>
+    run_pipeline(use_pretrained=True, epochs=args.epochs, rl_episodes=args.rl_episodes,
+  File "/home/crbt/Twin/fullPipeline.py", line 2140, in run_pipeline
+    history = trainer.fit(train_ds, val_ds, epochs=epochs)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/Twin/fullPipeline.py", line 906, in fit
+    step_out = self.train_step(batch, beta=beta)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/Twin/fullPipeline.py", line 857, in train_step
+    grads = tape.gradient(total_loss, self.model.trainable_variables)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/anaconda3/envs/TwinCell/lib/python3.11/site-packages/tensorflow/python/eager/backprop.py", line 1066, in gradient
+    flat_grad = imperative_grad.imperative_grad(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/anaconda3/envs/TwinCell/lib/python3.11/site-packages/tensorflow/python/eager/imperative_grad.py", line 67, in imperative_grad
+    return pywrap_tfe.TFE_Py_TapeGradient(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/anaconda3/envs/TwinCell/lib/python3.11/site-packages/tensorflow/python/eager/backprop.py", line 148, in _gradient_function
+    return grad_fn(mock_op, *out_grads)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/anaconda3/envs/TwinCell/lib/python3.11/site-packages/tensorflow/python/ops/math_grad.py", line 1654, in _SelectGradV2
+    gx = array_ops.where_v2(c, grad, zeros)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/crbt/anaconda3/envs/TwinCell/lib/python3.11/site-packages/tensorflow/python/util/traceback_utils.py", line 153, in error_handler
+    raise e.with_traceback(filtered_tb) from None
+  File "/home/crbt/anaconda3/envs/TwinCell/lib/python3.11/site-packages/tensorflow/python/framework/ops.py", line 5883, in raise_from_not_ok_status
+    raise core._status_to_exception(e) from None  # pylint: disable=protected-access
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+tensorflow.python.framework.errors_impl.ResourceExhaustedError: {{function_node __wrapped__SelectV2_device_/job:localhost/replica:0/task:0/device:GPU:0}} failed to allocate memory [Op:SelectV2] name: 
+[Sun May 24 11:57:21 WAT 2026] Exit: 1

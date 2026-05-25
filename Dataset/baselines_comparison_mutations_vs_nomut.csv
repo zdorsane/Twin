@@ -1,0 +1,16 @@
+Model,Split,Pearson_r_old,Pearson_r_new,delta_pearson_r,RMSE_old,RMSE_new,delta_rmse,R2_old,R2_new,delta_r2,Spearman_r_old,Spearman_r_new,delta_spearman_r,mutations_already_used
+Ridge (ECFP4+omics),Random,0.8636,0.8636,0.0,0.5075,0.5075,0.0,0.7459,0.7459,0.0,0.8592,0.8592,0.0,True
+Ridge (omics only),Random,0.265,0.265,0.0,0.9707,0.9707,0.0,0.0701,0.0701,0.0,0.2542,0.2542,0.0,True
+RF (ECFP4+omics),Random,0.5837,0.5837,0.0,0.8234,0.8234,0.0,0.3309,0.3309,0.0,0.6157,0.6157,0.0,True
+MLP (ECFP4+omics),Random,0.8819,0.8819,0.0,0.4751,0.4751,0.0,0.7773,0.7773,0.0,0.8794,0.8794,0.0,True
+XGBoost (ECFP4+omics),Random,0.8504,0.8504,0.0,0.5444,0.5444,0.0,0.7075,0.7075,0.0,0.8471,0.8471,0.0,True
+Ridge (ECFP4+omics),Leave-Drug-Out,0.2862,0.2862,0.0,1.0325,1.0325,0.0,-0.0649,-0.0649,0.0,0.2152,0.2152,0.0,True
+Ridge (omics only),Leave-Drug-Out,0.2951,0.2951,0.0,0.9564,0.9564,0.0,0.0865,0.0865,0.0,0.2788,0.2788,0.0,True
+RF (ECFP4+omics),Leave-Drug-Out,0.1835,0.1835,0.0,1.011,1.011,0.0,-0.0209,-0.0209,0.0,0.1114,0.1114,0.0,True
+MLP (ECFP4+omics),Leave-Drug-Out,0.3811,0.3811,0.0,0.9606,0.9606,0.0,0.0783,0.0783,0.0,0.3642,0.3642,0.0,True
+XGBoost (ECFP4+omics),Leave-Drug-Out,0.3543,0.3543,0.0,0.9438,0.9438,0.0,0.1103,0.1103,0.0,0.332,0.332,0.0,True
+Ridge (ECFP4+omics),Leave-Cell-Out,0.8131,0.8131,0.0,0.5865,0.5865,0.0,0.6599,0.6599,0.0,0.8062,0.8062,0.0,True
+Ridge (omics only),Leave-Cell-Out,0.1062,0.1062,0.0,1.0102,1.0102,0.0,-0.0091,-0.0091,0.0,0.1039,0.1039,0.0,True
+RF (ECFP4+omics),Leave-Cell-Out,0.5786,0.5786,0.0,0.8259,0.8259,0.0,0.3256,0.3256,0.0,0.5934,0.5934,0.0,True
+MLP (ECFP4+omics),Leave-Cell-Out,0.4863,0.4863,0.0,1.2681,1.2681,0.0,-0.59,-0.59,0.0,0.7933,0.7933,0.0,True
+XGBoost (ECFP4+omics),Leave-Cell-Out,0.8221,0.8221,0.0,0.5818,0.5818,0.0,0.6653,0.6653,0.0,0.8134,0.8134,0.0,True

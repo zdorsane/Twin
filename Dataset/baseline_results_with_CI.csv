@@ -1,0 +1,18 @@
+Model,Split,Pearson_r,CI_low,CI_high,RMSE,R2,Spearman_r,n_bootstrap,note
+Ridge (ECFP4+omics),Random,0.8533,0.8442,0.863,0.5192,0.7276,0.8465,1000,
+Ridge (omics only),Random,0.2301,0.2001,0.2615,0.9729,0.0437,0.2216,1000,
+RF (50 trees),Random,0.618,0.5987,0.6352,0.7955,0.3606,0.6654,1000,
+MLP (256→128),Random,0.8399,0.8295,0.8503,0.5441,0.7009,0.8326,1000,
+XGBoost (100 trees),Random,0.8351,0.8249,0.8449,0.5652,0.6773,0.8297,1000,
+Ridge (ECFP4+omics),Leave-Drug-Out,0.1603,0.1334,0.187,1.005,-0.1529,0.1678,1000,
+Ridge (omics only),Leave-Drug-Out,0.2277,0.1989,0.2572,0.9185,0.037,0.2197,1000,
+RF (50 trees),Leave-Drug-Out,0.1891,0.1541,0.2203,0.9483,-0.0266,0.0678,1000,
+MLP (256→128),Leave-Drug-Out,0.2198,0.1915,0.2466,0.9792,-0.0944,0.2208,1000,
+XGBoost (100 trees),Leave-Drug-Out,0.454,0.4286,0.477,0.834,0.206,0.4412,1000,
+Ridge (ECFP4+omics),Leave-Cell-Out,0.8149,0.8032,0.8254,0.5812,0.6612,0.8093,1000,
+Ridge (omics only),Leave-Cell-Out,0.1832,0.1527,0.2126,0.9929,0.0113,0.1861,1000,
+RF (50 trees),Leave-Cell-Out,0.6071,0.586,0.6249,0.8047,0.3506,0.6288,1000,
+MLP (256→128),Leave-Cell-Out,0.8096,0.797,0.8214,0.5863,0.6553,0.8028,1000,
+XGBoost (100 trees),Leave-Cell-Out,0.8131,0.8004,0.8238,0.5957,0.6442,0.807,1000,
+Bi-Int (epoch 4),Random,0.811,0.736,0.886,,,,0,CI estimated (no prediction npz)
+Bi-Int (epoch 2),Leave-Drug-Out,0.316,0.241,0.391,,,,0,CI estimated (no prediction npz)
