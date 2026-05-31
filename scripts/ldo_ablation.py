@@ -31,7 +31,7 @@ PYTHON = sys.executable  # use same interpreter / venv as this script
 # Each entry: (label, log_dir, extra_args)
 # extra_args is a list of CLI tokens appended to the base command.
 BASE_CMD = [
-    PYTHON, "fullPipeline.py",
+    PYTHON, "src/fullPipeline.py",
     "--mode", "pretrained",
     "--loss-mode", "cross_entropy",
     "--split-mode", "leave_drug_out",
@@ -241,16 +241,18 @@ def main():
                         help="Print commands without executing")
     parser.add_argument("--skip-runs", action="store_true",
                         help="Skip training; only rebuild table and figure from existing logs")
+    parser.add_argument("--start-from", type=int, default=0, metavar="N",
+                        help="Skip first N configs (0-indexed), resume from config N")
     args = parser.parse_args()
 
-    # Change to project root so fullPipeline.py paths resolve correctly
+    # Change to project root so src/fullPipeline.py paths resolve correctly
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.chdir(project_root)
     print(f"[CWD] {os.getcwd()}")
 
     if not args.skip_runs:
         failed = []
-        for cfg in CONFIGS:
+        for cfg in CONFIGS[args.start_from:]:
             rc = run_config(cfg, dry_run=args.dry_run)
             if rc != 0:
                 print(f"  [WARN] Run failed (rc={rc}) — results will be missing for this config.")

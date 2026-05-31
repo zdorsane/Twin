@@ -1,0 +1,113 @@
+[GPU] 1 GPU(s) détecté(s) : ['/physical_device:GPU:0']
+========================================================================
+  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction
+========================================================================
+
+[Pre-trained] Loading ChEMBL pre-trained weights for drug encoder...
+[Pre-trained] Drug encoder initialized with ChEMBL pre-training.
+
+[Tokenizer] Saved parallel SMILES tokenizer to smiles_tokenizer.json
+[Tokenizer] Successfully loaded parallel SMILES tokenizer.
+
+[Model Built] IC50 output shape: (2,) | KL: 174.3537
+  Trainable parameters: 9,255,070
+
+[CCLE] Chargement des données réelles depuis Dataset/ccle_broad_2019 ...
+  IC50 : 266 drogues × 1068 lignées
+  [Cache] Chargement depuis Dataset/ccle_broad_2019/omics_cache_gex978_cna426.npz ...
+  GEx shape : (647, 978)  [depuis cache]
+  CNA shape : (647, 426)  [depuis cache]
+  Mutations : 647/647 lignées couvertes, 735 gènes (top: ['TTN', 'MUC16', 'MT-ND5', 'TP53', 'MT-CYB'])
+  Mutations shape : (647, 735)  sparsity=0.844  mean_mutations_per_cell=115.0
+  [P2-assert] mutation_matrix.shape[0] == expression_matrix.shape[0] → 647 == 647  ✓
+  [SMILES cache] 201 hits, 65 confirmed misses (266 total entries)
+  [PubChem] Querying 65 drugs missing from cache ...
+  [P1-check] Afatinib-1                          smiles='CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=74
+  [P1-check] Afatinib-2                          smiles='CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=74
+  [P1-check] Avagacestat-1                       smiles='C1=CC(=CC=C1S(=O)(=O)N(CC2=C(C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=62
+  [P1-check] Avagacestat-2                       smiles='C1=CC(=CC=C1S(=O)(=O)N(CC2=C(C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=62
+  [P1-check] AZD6482-1                           smiles='CC1=CN2C(=O)C=C(N=C2C(=C1)[C@@'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=57
+  Drogues avec vrais SMILES : 201/266 (75.6%)
+  Drogues exclues (pas de SMILES) : 65 → ['AKTinhibitorVIII-1', 'AKTinhibitorVIII-2', 'A-443654', 'A-770041', 'BAY-61-3606']...
+
+  ── IC50 Validation (Priority 3) ──────────────────────────────
+  Raw IC50 entries    : 172,102  (drugs × common cell lines)
+  Valid (>0, finite)  : 137,182
+  Removed NaN/inf     : 34,920  (20.3%)
+  Non-positive (<=0)  : 0  (clamped to 0.001 µM before log1p)
+  Outliers >100 µM    : 23,163  (16.9%)  — kept (high IC50 = resistant, biologically meaningful)
+  IC50 range          : 0.0001 — 400374.7 µM
+  Percentiles [1,50,99]: [4.00000e-03 1.32960e+01 8.92056e+02]
+  ─────────────────────────────────────────────────────────────
+  Triplets (drogue, lignée, IC50) valides : 103,477
+  [RAM] Sous-échantillonnage → 20,000 triplets
+  Post-log1p IC50     : min=0.0010  max=11.5957  mean=2.6541  std=1.8442
+  Post-zscore IC50    : min=-1.439  max=4.848  mean=0.000  std=1.000
+  Leave-drug-out split : 171 train drugs | 30 val drugs
+  Train : 16,832 | Val : 3,168
+
+[Data] Données CCLE réelles chargées (20,000 triplets).
+
+[Training] Bi-Int Digital Twin on IC50 prediction (QSAR)...
+Epoch   1 | Train RMSE: 0.9518 | Val RMSE: 0.8434 | Pearson r: 0.5354 | CROSS_ENTROPY: 0.4741 | ‖∇‖=23.94
+Epoch   5 | Train RMSE: 0.5842 | Val RMSE: 1.2527 | Pearson r: 0.1727 | CROSS_ENTROPY: 0.4502 | ‖∇‖=8.81
+[Trainer] Logs → logs/ldo_baseline/  (TensorBoard, training_log.csv, val_curves.json)
+
+[Done] Pipeline complete.
+/home/crbt/Twin/venv_tf/bin/python3: can't open file '/home/crbt/Twin/fullPipeline.py': [Errno 2] No such file or directory
+/home/crbt/Twin/venv_tf/bin/python3: can't open file '/home/crbt/Twin/fullPipeline.py': [Errno 2] No such file or directory
+/home/crbt/Twin/venv_tf/bin/python3: can't open file '/home/crbt/Twin/fullPipeline.py': [Errno 2] No such file or directory
+/home/crbt/Twin/venv_tf/bin/python3: can't open file '/home/crbt/Twin/fullPipeline.py': [Errno 2] No such file or directory
+[CWD] /home/crbt/Twin
+
+======================================================================
+[RUN] Baseline (actuel)
+  CMD: /home/crbt/Twin/venv_tf/bin/python3 fullPipeline.py --mode pretrained --loss-mode cross_entropy --split-mode leave_drug_out --no-ppo --epochs 5 --log-dir logs/ldo_baseline
+  Finished in 115.0 min  (return code 0)
+
+======================================================================
+[RUN] + Early stopping (patience=3, 15ep)
+  CMD: /home/crbt/Twin/venv_tf/bin/python3 fullPipeline.py --mode pretrained --loss-mode cross_entropy --split-mode leave_drug_out --no-ppo --epochs 15 --early-stopping 3 --log-dir logs/ldo_es
+  Finished in 0.0 min  (return code 2)
+  [WARN] Run failed (rc=2) — results will be missing for this config.
+
+======================================================================
+[RUN] + Dropout 0.3 + L2 1e-4
+  CMD: /home/crbt/Twin/venv_tf/bin/python3 fullPipeline.py --mode pretrained --loss-mode cross_entropy --split-mode leave_drug_out --no-ppo --epochs 15 --early-stopping 3 --dropout-rate 0.3 --weight-decay 1e-4 --log-dir logs/ldo_reg
+  Finished in 0.0 min  (return code 2)
+  [WARN] Run failed (rc=2) — results will be missing for this config.
+
+======================================================================
+[RUN] + GNN freeze 3 ep
+  CMD: /home/crbt/Twin/venv_tf/bin/python3 fullPipeline.py --mode pretrained --loss-mode cross_entropy --split-mode leave_drug_out --no-ppo --epochs 15 --early-stopping 3 --dropout-rate 0.3 --weight-decay 1e-4 --gnn-freeze-epochs 3 --log-dir logs/ldo_freeze
+  Finished in 0.0 min  (return code 2)
+  [WARN] Run failed (rc=2) — results will be missing for this config.
+
+======================================================================
+[RUN] + 40k triplets
+  CMD: /home/crbt/Twin/venv_tf/bin/python3 fullPipeline.py --mode pretrained --loss-mode cross_entropy --split-mode leave_drug_out --no-ppo --epochs 15 --early-stopping 3 --dropout-rate 0.3 --weight-decay 1e-4 --data-size 40000 --log-dir logs/ldo_40k
+  Finished in 0.0 min  (return code 2)
+  [WARN] Run failed (rc=2) — results will be missing for this config.
+
+[WARN] 4 run(s) failed: ['+ Early stopping (patience=3, 15ep)', '+ Dropout 0.3 + L2 1e-4', '+ GNN freeze 3 ep', '+ 40k triplets']
+  [WARN] No results found for '+ Early stopping (patience=3, 15ep)' in logs/ldo_es
+  [WARN] No results found for '+ Dropout 0.3 + L2 1e-4' in logs/ldo_reg
+  [WARN] No results found for '+ GNN freeze 3 ep' in logs/ldo_freeze
+  [WARN] No results found for '+ 40k triplets' in logs/ldo_40k
+
+======================================================================
+  LDO Ablation Results
+======================================================================
+Config                                     |  LDO r | LDO RMSE | epochs
+----------------------------------------------------------------------
+Baseline (actuel)                          |  0.535 |    0.843 |      1
++ Early stopping (patience=3, 15ep)        |    nan |      nan |    nan
++ Dropout 0.3 + L2 1e-4                    |    nan |      nan |    nan
++ GNN freeze 3 ep                          |    nan |      nan |    nan
++ 40k triplets                             |    nan |      nan |    nan
+XGBoost (cible à battre)                   |  0.367 |    0.938 |      —
+======================================================================
+[CSV] Saved → Dataset/ldo_improvement_ablation.csv
+[FIG] Saved → figures/07_ldo_ablation.png
+
+[Done] Ablation complete.
