@@ -44,7 +44,12 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from typing import List, Tuple, Deque
 
-sys.path.insert(0, "/home/crbt/Twin")
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_SRC_DIR)
+if _SRC_DIR not in sys.path:
+    sys.path.insert(0, _SRC_DIR)
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
 
 from fullPipeline import (
     BiIntDigitalTwin,
@@ -95,7 +100,7 @@ SEED_SMILES = [
 
 
 # ─── ChEMBL SMILES loader (copied from dqn_optimizer.py) ─────────────────────
-CHEMBL_SDF_PATH = "/home/crbt/Twin/Dataset/chembl_36.sdf"
+CHEMBL_SDF_PATH = os.path.join(_ROOT, "Dataset", "chembl_36.sdf")
 
 def load_chembl_smiles(n: int = 10_000,
                        sdf_path: str = CHEMBL_SDF_PATH,
@@ -778,7 +783,9 @@ class BRICSDQNOptimizer:
         )
 
     def save_results_csv(self, episode_log: List[dict],
-                         path: str = "/home/crbt/Twin/Dataset/brics_dqn_results.csv"):
+                         path: str = None):
+        if path is None:
+            path = os.path.join(_ROOT, "Dataset", "brics_dqn_results.csv")
         os.makedirs(os.path.dirname(path), exist_ok=True)
         fieldnames = ["episode", "reward", "valid", "smiles",
                       "brics_success", "n_fragments"]

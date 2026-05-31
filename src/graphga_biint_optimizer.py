@@ -23,10 +23,14 @@ except Exception:
     rdkit_sascorer = None
     RDKitSAScorer_AVAILABLE = False
 
-sys.path.insert(0, "/home/crbt/Twin")
+_SRC_DIR = os.path.dirname(os.path.abspath(__file__))
+_ROOT = os.path.dirname(_SRC_DIR)
+for _p in (_SRC_DIR, _ROOT):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 from fullPipeline import BiIntDigitalTwin, BRICSMolecularFeaturizer, DigitalTwinInference, HP
 
-INITIAL_POP_FILE = "smiles_data.txt"
+INITIAL_POP_FILE = os.path.join(_ROOT, "smiles_data.txt")
 MAX_POPULATION = 40
 GENERATIONS = 50
 OFFSPRING_PER_GEN = 40

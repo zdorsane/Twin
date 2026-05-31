@@ -1,34 +1,51 @@
-# Datasets volumineux (>100MB, refusés par GitHub)
+# ── Large datasets (>100 MB, rejected by GitHub) ─────────────────────────────
 Dataset/
+!Dataset/*.csv
 
-# Environnements virtuels
-venv/
-venv_tf/
-
-# Cache Python
-__pycache__/
-*.pyc
-*.pyo
-
-# Logs
-*.log
-
-# Fichiers temporaires / installation
-*.deb
-
-# Modèles lourds (optionnel : décommenter si trop grands)
-# pretrained_weights/
-# *.keras
-
-# Keras / HDF5 weight files (large binaries)
+# ── Python binary weights & model checkpoints ─────────────────────────────────
 *.h5
 *.keras
+*.npz
+*.sdf
+*.sdf:Zone.Identifier
 weights/
 dqn_weights_*/
 pretrained_weights/
+pretrained_drug_encoder.keras
 
-# Logs directory (large, runtime-generated)
+# ── Python cache ──────────────────────────────────────────────────────────────
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# ── Virtual environments ──────────────────────────────────────────────────────
+venv/
+venv_tf/
+.venv*/
+env/
+
+# ── Logs & runtime outputs ────────────────────────────────────────────────────
 logs/
-
-# Run logs
+*.log
 run_log.txt
+
+# ── OS / editor artefacts ─────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.deb
+*.Zone.Identifier
+
+# ── Jupyter checkpoints ───────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── Miscellaneous generated files ─────────────────────────────────────────────
+graphga_population.txt
+graphga_ranked_population.csv
+rl_generated_smiles.txt
+smiles_tokenizer.json
+omics_cache*.npz
+
+# ── Claude Code internal ──────────────────────────────────────────────────────
+.claude/scheduled_tasks.lock
