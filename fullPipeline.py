@@ -110,6 +110,8 @@ HP = dict(
     batch_size      = 8,
     learning_rate   = 1e-4,
     dropout_rate    = 0.1,
+    weight_decay    = 0.0,    # AdamW L2 penalty (0 = disabled); set via --weight-decay
+    gnn_freeze_epochs = 0,    # freeze GNN layers for N epochs then unfreeze
 
     # RL (Drug Generation)
     rl_gamma        = 0.99,
@@ -829,10 +831,12 @@ class BiIntTrainer:
         self.loss_mode   = loss_mode
         self.beta_anneal = beta_anneal
         self.current_beta = hp.get('vae_beta_start', 0.0) if beta_anneal else hp['vae_beta']
-        self.opt         = keras.optimizers.AdamW(hp['learning_rate'])
+        self.opt         = keras.optimizers.AdamW(
+            hp['learning_rate'], weight_decay=hp.get('weight_decay', 0.0))
         self.mse         = keras.losses.MeanSquaredError()
         self.log_dir     = log_dir
         self.es_patience = early_stopping_patience
+        self.gnn_freeze_epochs = hp.get('gnn_freeze_epochs', 0)
         os.makedirs(log_dir, exist_ok=True)
 
     def _beta(self, epoch: int) -> float:
@@ -898,8 +902,21 @@ class BiIntTrainer:
         es_count  = 0
         stopped_early = False
 
+        # Progressive GNN unfreezing: freeze drug_gnn layers for first N epochs
+        if self.gnn_freeze_epochs > 0:
+            for layer in self.model.drug_gnn.layers:
+                layer.trainable = False
+            print(f"[GNN Freeze] drug_gnn frozen for first {self.gnn_freeze_epochs} epochs.")
+
         for epoch in range(1, epochs + 1):
             beta = self._beta(epoch)
+
+            # Unfreeze GNN after freeze period
+            if self.gnn_freeze_epochs > 0 and epoch == self.gnn_freeze_epochs + 1:
+                for layer in self.model.drug_gnn.layers:
+                    layer.trainable = True
+                print(f"[GNN Unfreeze] drug_gnn trainable from epoch {epoch}.")
+
             train_metrics: dict[str, list] = {}
 
             for batch in train_ds:
@@ -1442,6 +1459,7 @@ def load_ccle_real_data(
     ccle_dir='Dataset/ccle_broad_2019',
     gex_dim=HP['gex_dim'],
     mut_dim=HP['mut_dim'],
+    max_triplets=20000,
     cnv_dim=HP['cnv_dim'],
     max_atoms=HP['max_atoms'],
     atom_feat_dim=22,
@@ -1713,10 +1731,10 @@ def load_ccle_real_data(
     if n == 0:
         return None, None, 0
 
-    # Subsample to 20k triplets to fit in WSL2 32GB RAM (103k × 6 arrays = ~22GB peak)
-    if n > 20000:
+    # Subsample to max_triplets to limit RAM (103k × 6 arrays = ~22GB at full size)
+    if n > max_triplets:
         rng_sub = np.random.default_rng(42)
-        sub_idx = rng_sub.choice(n, size=20000, replace=False)
+        sub_idx = rng_sub.choice(n, size=max_triplets, replace=False)
         sub_idx.sort()
         samples_atoms    = [samples_atoms[i]    for i in sub_idx]
         samples_adj      = [samples_adj[i]      for i in sub_idx]
@@ -1726,8 +1744,8 @@ def load_ccle_real_data(
         samples_ic50     = [samples_ic50[i]     for i in sub_idx]
         samples_drug_ids = [samples_drug_ids[i] for i in sub_idx]
         samples_cell_idx = [samples_cell_idx[i] for i in sub_idx]
-        n = 20000
-        print(f"  [RAM] Sous-échantillonnage → {n:,} triplets (WSL2 32GB limit)")
+        n = max_triplets
+        print(f"  [RAM] Sous-échantillonnage → {n:,} triplets")
 
     # Stack only IC50 (small) to compute z-score stats,
     # then build arrays for each modality separately to avoid a single 22 GB peak.
@@ -2093,7 +2111,7 @@ def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_d
 
 def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
                  loss_mode='kl', beta_anneal=False, split_mode='random',
-                 log_dir='logs', early_stopping_patience=0):
+                 log_dir='logs', early_stopping_patience=0, data_size=20000):
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
@@ -2123,6 +2141,7 @@ def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
         ccle_dir='Dataset/ccle_broad_2019',
         batch_size=HP['batch_size'],
         split_mode=split_mode,
+        max_triplets=data_size,
     )
     if train_ds is None:
         print("\n[Data] CCLE non disponible — données synthétiques utilisées.")
@@ -2256,14 +2275,30 @@ if __name__ == "__main__":
                         help='Directory for TensorBoard events, training_log.csv, and val_curves.json')
     parser.add_argument('--early-stopping', type=int, default=0, metavar='PATIENCE',
                         help='Stop if val RMSE does not improve for PATIENCE epochs (0 = disabled)')
+    parser.add_argument('--dropout-rate', type=float, default=None,
+                        help='Dropout rate for Bi-Int blocks and IC50 head (default: HP value 0.1)')
+    parser.add_argument('--weight-decay', type=float, default=None,
+                        help='AdamW weight decay / L2 regularization (default: 0.0)')
+    parser.add_argument('--gnn-freeze-epochs', type=int, default=0, metavar='N',
+                        help='Freeze pre-trained GNN drug encoder for first N epochs (0 = no freeze)')
+    parser.add_argument('--data-size', type=int, default=20000,
+                        help='Max triplets to subsample from CCLE (default: 20000)')
     args = parser.parse_args()
+
+    # Apply CLI overrides to global HP before model construction
+    if args.dropout_rate is not None:
+        HP['dropout_rate'] = args.dropout_rate
+    if args.weight_decay is not None:
+        HP['weight_decay'] = args.weight_decay
+    HP['gnn_freeze_epochs'] = args.gnn_freeze_epochs
 
     if args.mode == 'baseline':
         run_pipeline(use_pretrained=False, epochs=args.epochs, run_ppo=False,
                      loss_mode=args.loss_mode, beta_anneal=args.beta_anneal,
                      split_mode=args.split_mode,
                      log_dir=args.log_dir,
-                     early_stopping_patience=args.early_stopping)
+                     early_stopping_patience=args.early_stopping,
+                     data_size=args.data_size)
     elif args.mode == 'compare':
         compare_pretraining(epochs=args.epochs)
     else:
@@ -2271,4 +2306,5 @@ if __name__ == "__main__":
                      run_ppo=not args.no_ppo, loss_mode=args.loss_mode,
                      beta_anneal=args.beta_anneal, split_mode=args.split_mode,
                      log_dir=args.log_dir,
-                     early_stopping_patience=args.early_stopping)
+                     early_stopping_patience=args.early_stopping,
+                     data_size=args.data_size)
