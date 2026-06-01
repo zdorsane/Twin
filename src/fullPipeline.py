@@ -2111,7 +2111,8 @@ def load_pretrained_drug_encoder(model, weight_path='pretrained_weights/chembl_d
 
 def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
                  loss_mode='kl', beta_anneal=False, split_mode='random',
-                 log_dir='logs', early_stopping_patience=0, data_size=20000):
+                 log_dir='logs', early_stopping_patience=0, data_size=20000,
+                 save_model=True):
     print("=" * 72)
     print("  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction")
     print("=" * 72)
@@ -2155,6 +2156,30 @@ def run_pipeline(use_pretrained=True, epochs=20, run_ppo=True, rl_episodes=None,
                            log_dir=log_dir,
                            early_stopping_patience=early_stopping_patience)
     history = trainer.fit(train_ds, val_ds, epochs=epochs)
+
+    # ── Checkpoint : save model weights for inference / interpretability ──────
+    if save_model:
+        w_path = os.path.join(log_dir, "biint_ic50_model.weights.h5")
+        try:
+            model.save_weights(w_path)
+            print(f"[Checkpoint] Poids sauvegardés → {w_path}")
+        except Exception as e_w:
+            print(f"[WARN] save_weights() a échoué : {e_w}")
+        # Also attempt full model save (may fail for subclassed models)
+        ckpt_path = os.path.join(log_dir, "biint_ic50_model.keras")
+        try:
+            model.save(ckpt_path)
+            print(f"[Checkpoint] Modèle complet sauvegardé → {ckpt_path}")
+        except Exception as e_m:
+            print(f"[Checkpoint] full save skipped ({type(e_m).__name__}) — poids .h5 suffisants")
+        # Save HP snapshot alongside weights for reliable reconstruction
+        hp_path = os.path.join(log_dir, "hp_snapshot.json")
+        try:
+            with open(hp_path, "w") as fh:
+                json.dump({k: v for k, v in HP.items() if isinstance(v, (int, float, str, list))}, fh, indent=2)
+            print(f"[Checkpoint] HP snapshot → {hp_path}")
+        except Exception:
+            pass
 
     final_stats = None
     if run_ppo:
@@ -2283,6 +2308,10 @@ if __name__ == "__main__":
                         help='Freeze pre-trained GNN drug encoder for first N epochs (0 = no freeze)')
     parser.add_argument('--data-size', type=int, default=20000,
                         help='Max triplets to subsample from CCLE (default: 20000)')
+    parser.add_argument('--save-model', action='store_true', default=True,
+                        help='Save model weights after training (default: True)')
+    parser.add_argument('--no-save-model', dest='save_model', action='store_false',
+                        help='Skip model weight saving')
     args = parser.parse_args()
 
     # Apply CLI overrides to global HP before model construction
@@ -2298,7 +2327,8 @@ if __name__ == "__main__":
                      split_mode=args.split_mode,
                      log_dir=args.log_dir,
                      early_stopping_patience=args.early_stopping,
-                     data_size=args.data_size)
+                     data_size=args.data_size,
+                     save_model=args.save_model)
     elif args.mode == 'compare':
         compare_pretraining(epochs=args.epochs)
     else:
@@ -2307,4 +2337,5 @@ if __name__ == "__main__":
                      beta_anneal=args.beta_anneal, split_mode=args.split_mode,
                      log_dir=args.log_dir,
                      early_stopping_patience=args.early_stopping,
-                     data_size=args.data_size)
+                     data_size=args.data_size,
+                     save_model=args.save_model)
