@@ -456,7 +456,9 @@ class UnifiedOmicsVAE(Model):
         log_var = self.log_var(fused)
         return mu, log_var
 
-    def reparameterize(self, mu, log_var):
+    def reparameterize(self, mu, log_var, training=False):
+        if not training:
+            return mu  # deterministic mean at inference
         eps = tf.random.normal(tf.shape(mu))
         return mu + tf.exp(0.5 * log_var) * eps
 
@@ -471,7 +473,7 @@ class UnifiedOmicsVAE(Model):
         """
         gex, mut, cnv = inputs
         mu, log_var   = self.encode(gex, mut, cnv, training)
-        z             = self.reparameterize(mu, log_var)
+        z             = self.reparameterize(mu, log_var, training=training)
         recon         = self.decode(z, training)
 
         if loss_mode in ('cross_entropy', 'both'):
