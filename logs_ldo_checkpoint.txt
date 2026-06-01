@@ -1,0 +1,60 @@
+[GPU] 1 GPU(s) détecté(s) : ['/physical_device:GPU:0']
+========================================================================
+  Bi-Int Digital Twin  |  Cell Line Drug Screening  |  IC50 Prediction
+========================================================================
+
+[Pre-trained] Loading ChEMBL pre-trained weights for drug encoder...
+[Pre-trained] Drug encoder initialized with ChEMBL pre-training.
+
+[Tokenizer] Saved parallel SMILES tokenizer to smiles_tokenizer.json
+[Tokenizer] Successfully loaded parallel SMILES tokenizer.
+
+[Model Built] IC50 output shape: (2,) | KL: 155.5624
+  Trainable parameters: 9,255,070
+
+[CCLE] Chargement des données réelles depuis Dataset/ccle_broad_2019 ...
+  IC50 : 266 drogues × 1068 lignées
+  [Cache] Chargement depuis Dataset/ccle_broad_2019/omics_cache_gex978_cna426.npz ...
+  GEx shape : (647, 978)  [depuis cache]
+  CNA shape : (647, 426)  [depuis cache]
+  Mutations : 647/647 lignées couvertes, 735 gènes (top: ['TTN', 'MUC16', 'MT-ND5', 'TP53', 'MT-CYB'])
+  Mutations shape : (647, 735)  sparsity=0.844  mean_mutations_per_cell=115.0
+  [P2-assert] mutation_matrix.shape[0] == expression_matrix.shape[0] → 647 == 647  ✓
+  [SMILES cache] 201 hits, 65 confirmed misses (266 total entries)
+  [PubChem] Querying 65 drugs missing from cache ...
+  [P1-check] Afatinib-1                          smiles='CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=74
+  [P1-check] Afatinib-2                          smiles='CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=74
+  [P1-check] Avagacestat-1                       smiles='C1=CC(=CC=C1S(=O)(=O)N(CC2=C(C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=62
+  [P1-check] Avagacestat-2                       smiles='C1=CC(=CC=C1S(=O)(=O)N(CC2=C(C'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=62
+  [P1-check] AZD6482-1                           smiles='CC1=CN2C(=O)C=C(N=C2C(=C1)[C@@'... atom_feat=(50, 22) morgan_fp=(2048,) fp_bits_on=57
+  Drogues avec vrais SMILES : 201/266 (75.6%)
+  Drogues exclues (pas de SMILES) : 65 → ['AKTinhibitorVIII-1', 'AKTinhibitorVIII-2', 'A-443654', 'A-770041', 'BAY-61-3606']...
+
+  ── IC50 Validation (Priority 3) ──────────────────────────────
+  Raw IC50 entries    : 172,102  (drugs × common cell lines)
+  Valid (>0, finite)  : 137,182
+  Removed NaN/inf     : 34,920  (20.3%)
+  Non-positive (<=0)  : 0  (clamped to 0.001 µM before log1p)
+  Outliers >100 µM    : 23,163  (16.9%)  — kept (high IC50 = resistant, biologically meaningful)
+  IC50 range          : 0.0001 — 400374.7 µM
+  Percentiles [1,50,99]: [4.00000e-03 1.32960e+01 8.92056e+02]
+  ─────────────────────────────────────────────────────────────
+  Triplets (drogue, lignée, IC50) valides : 103,477
+  [RAM] Sous-échantillonnage → 20,000 triplets
+  Post-log1p IC50     : min=0.0010  max=11.5957  mean=2.6541  std=1.8442
+  Post-zscore IC50    : min=-1.439  max=4.848  mean=0.000  std=1.000
+  Leave-drug-out split : 171 train drugs | 30 val drugs
+  Train : 16,832 | Val : 3,168
+
+[Data] Données CCLE réelles chargées (20,000 triplets).
+
+[Training] Bi-Int Digital Twin on IC50 prediction (QSAR)...
+Epoch   1 | Train RMSE: 0.9512 | Val RMSE: 1.0166 | Pearson r: 0.2098 | CROSS_ENTROPY: 0.4757 | ‖∇‖=32.24
+[EarlyStopping] No improvement for 3 epochs — stopping at epoch 4.
+[Trainer] Logs → logs/ldo_checkpoint/  (TensorBoard, training_log.csv, val_curves.json)
+[Checkpoint] Poids sauvegardés → logs/ldo_checkpoint/biint_ic50_model.weights.h5
+[Checkpoint] Modèle complet sauvegardé → logs/ldo_checkpoint/biint_ic50_model.keras
+[Checkpoint] HP snapshot → logs/ldo_checkpoint/hp_snapshot.json
+
+[Done] Pipeline complete.
+DONE:0
