@@ -271,6 +271,16 @@ with st.sidebar:
     st.markdown("**Candidats générés :** 60 (38 MedChem-clean)")
     st.markdown("---")
     st.caption("Prototype de recherche — validation expérimentale requise")
+    # RDKit diagnostic
+    try:
+        from rdkit import Chem
+        _m = Chem.MolFromSmiles("c1ccccc1")
+        if _m is not None:
+            st.caption("✅ RDKit OK")
+        else:
+            st.caption("⚠️ RDKit installé mais MolFromSmiles échoue")
+    except ImportError:
+        st.caption("❌ RDKit non installé")
 
 
 # ═══════════════════════════════════════════
@@ -317,25 +327,27 @@ def load_csv(path):
 
 
 def mol_image_b64(smiles):
+    """Returns (base64_png, error_msg). error_msg is None on success."""
     try:
         from rdkit import Chem, RDLogger
-        from rdkit.Chem import Draw, AllChem
+        from rdkit.Chem import Draw
         from io import BytesIO
         import base64
         RDLogger.DisableLog("rdApp.*")
-        # Try with sanitize first, fallback without stereochemistry
         mol = Chem.MolFromSmiles(smiles, sanitize=True)
         if mol is None:
             mol = Chem.MolFromSmiles(smiles, sanitize=False)
             if mol is None:
-                return None
+                return None, f"RDKit: MolFromSmiles returned None pour: {smiles[:40]}"
             Chem.SanitizeMol(mol, catchErrors=True)
         img = Draw.MolToImage(mol, size=(300, 220))
         buf = BytesIO()
         img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode()
-    except Exception:
-        return None
+        return base64.b64encode(buf.getvalue()).decode(), None
+    except ImportError:
+        return None, "RDKit non disponible sur ce serveur"
+    except Exception as e:
+        return None, f"Erreur RDKit: {str(e)[:80]}"
 
 
 def tanimoto_alert(smiles, smiles_map):
@@ -489,14 +501,17 @@ elif page == "🔬  Prédiction IC50":
             with st.spinner("Calcul…"):
 
                 # Structure 2D
-                img = mol_image_b64(smiles_input)
+                img, img_err = mol_image_b64(smiles_input)
                 if img:
                     st.markdown(
                         f'<img src="data:image/png;base64,{img}" '
-                        f'style="border-radius:8px;width:100%;max-width:280px;"/>',
+                        f'style="border-radius:8px;width:100%;max-width:300px;"/>',
                         unsafe_allow_html=True)
+                elif img_err and "non disponible" in img_err:
+                    # RDKit absent — afficher SMILES texte proprement
+                    st.info(f"🧪 Structure non affichable (RDKit indisponible sur ce serveur)\n\n`{smiles_input[:60]}`")
                 else:
-                    st.error("SMILES invalide.")
+                    st.warning(f"⚠️ {img_err or 'Structure non affichable'}")
 
                 # Alerte Tanimoto
                 st.markdown("**Domaine d'applicabilité**")
@@ -571,7 +586,7 @@ elif page == "💊  Bibliothèque moléculaire":
             cols = st.columns(3)
             for i, (_, row) in enumerate(df_cand.head(3).iterrows()):
                 with cols[i]:
-                    img = mol_image_b64(row["smiles"])
+                    img, _ = mol_image_b64(row["smiles"])
                     if img:
                         st.markdown(f'<img src="data:image/png;base64,{img}" '
                                     f'style="width:100%;border-radius:8px;"/>',
