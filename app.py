@@ -24,232 +24,26 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── CSS — Linear/Vercel style ─────────────────────────────────────────────────
+# ── CSS ───────────────────────────────────────────────────────────────────────
 st.markdown("""
 <style>
-/* ── Fonts ── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
-
-* { font-family: 'Inter', sans-serif !important; }
-
-/* ── Global background ── */
-.stApp { background: #080b12 !important; }
-[data-testid="stAppViewContainer"] { background: #080b12 !important; }
-[data-testid="stHeader"] { background: transparent !important; }
-
-/* ── Sidebar ── */
-[data-testid="stSidebar"] {
-    background: #0d1117 !important;
-    border-right: 1px solid rgba(0, 220, 255, 0.08) !important;
-}
-[data-testid="stSidebar"] * { color: #c9d1d9 !important; }
-[data-testid="stSidebar"] hr { border-color: rgba(0,220,255,0.12) !important; }
-
-/* ── Radio buttons in sidebar ── */
-[data-testid="stSidebar"] [data-baseweb="radio"] label {
-    color: #8b949e !important;
-    font-size: 0.9rem !important;
-    padding: 4px 0 !important;
-    transition: color 0.2s;
-}
-[data-testid="stSidebar"] [data-baseweb="radio"] label:hover { color: #00dcff !important; }
-
-/* ── Metric cards — glassmorphism ── */
+[data-testid="stSidebar"] { background: #0f1117; }
+[data-testid="stSidebar"] * { color: #e0e0e0 !important; }
 .metric-card {
-    background: linear-gradient(135deg, rgba(0,220,255,0.04) 0%, rgba(13,17,23,0.9) 100%);
-    backdrop-filter: blur(12px);
-    border-radius: 16px;
-    padding: 22px 24px;
-    border: 1px solid rgba(0,220,255,0.15);
-    margin-bottom: 14px;
-    box-shadow: 0 0 24px rgba(0,220,255,0.04), inset 0 1px 0 rgba(255,255,255,0.04);
-    transition: border-color 0.3s, box-shadow 0.3s;
-    position: relative;
-    overflow: hidden;
+    background: #1e2130; border-radius: 12px; padding: 18px 22px;
+    border-left: 4px solid #4CAF50; margin-bottom: 12px;
 }
-.metric-card::before {
-    content: '';
-    position: absolute;
-    top: 0; left: 0; right: 0;
-    height: 1px;
-    background: linear-gradient(90deg, transparent, rgba(0,220,255,0.4), transparent);
-}
-.metric-card:hover {
-    border-color: rgba(0,220,255,0.35);
-    box-shadow: 0 0 32px rgba(0,220,255,0.10);
-}
-.metric-card.warn {
-    border-color: rgba(255,170,0,0.2);
-    background: linear-gradient(135deg, rgba(255,170,0,0.04) 0%, rgba(13,17,23,0.9) 100%);
-}
-.metric-card.warn::before {
-    background: linear-gradient(90deg, transparent, rgba(255,170,0,0.4), transparent);
-}
-.metric-card.danger {
-    border-color: rgba(255,70,70,0.2);
-    background: linear-gradient(135deg, rgba(255,70,70,0.04) 0%, rgba(13,17,23,0.9) 100%);
-}
-.metric-card.danger::before {
-    background: linear-gradient(90deg, transparent, rgba(255,70,70,0.4), transparent);
-}
-.metric-card.blue {
-    border-color: rgba(100,160,255,0.2);
-    background: linear-gradient(135deg, rgba(100,160,255,0.04) 0%, rgba(13,17,23,0.9) 100%);
-}
-.metric-val {
-    font-size: 2.2rem;
-    font-weight: 800;
-    color: #ffffff;
-    letter-spacing: -0.02em;
-    line-height: 1.1;
-    background: linear-gradient(135deg, #ffffff 0%, #00dcff 100%);
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-    background-clip: text;
-}
-.metric-card.warn  .metric-val { background: linear-gradient(135deg,#fff 0%,#ffaa00 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-.metric-card.danger .metric-val { background: linear-gradient(135deg,#fff 0%,#ff4646 100%); -webkit-background-clip:text; -webkit-text-fill-color:transparent; background-clip:text; }
-.metric-lbl {
-    font-size: 0.8rem;
-    color: #6e7681;
-    margin-top: 6px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-}
-
-/* ── Alert badges ── */
-.alert-reliable {
-    background: linear-gradient(135deg, rgba(0,220,100,0.08), rgba(0,220,100,0.03));
-    border: 1px solid rgba(0,220,100,0.3);
-    border-radius: 10px; padding: 12px 16px;
-    color: #3ddc84; font-weight: 600; font-size: 0.92rem;
-    box-shadow: 0 0 16px rgba(0,220,100,0.08);
-}
-.alert-caution {
-    background: linear-gradient(135deg, rgba(255,170,0,0.08), rgba(255,170,0,0.03));
-    border: 1px solid rgba(255,170,0,0.3);
-    border-radius: 10px; padding: 12px 16px;
-    color: #ffaa00; font-weight: 600; font-size: 0.92rem;
-    box-shadow: 0 0 16px rgba(255,170,0,0.08);
-}
-.alert-unreliable {
-    background: linear-gradient(135deg, rgba(255,70,70,0.08), rgba(255,70,70,0.03));
-    border: 1px solid rgba(255,70,70,0.3);
-    border-radius: 10px; padding: 12px 16px;
-    color: #ff6b6b; font-weight: 600; font-size: 0.92rem;
-    box-shadow: 0 0 16px rgba(255,70,70,0.08);
-}
-
-/* ── Titles ── */
-h1 {
-    font-size: 2.4rem !important;
-    font-weight: 800 !important;
-    letter-spacing: -0.03em !important;
-    background: linear-gradient(135deg, #ffffff 30%, #00dcff 100%);
-    -webkit-background-clip: text !important;
-    -webkit-text-fill-color: transparent !important;
-    background-clip: text !important;
-}
-h2, h3 {
-    color: #e6edf3 !important;
-    font-weight: 700 !important;
-    letter-spacing: -0.02em !important;
-}
-
-/* ── Buttons ── */
-.stButton > button {
-    background: linear-gradient(135deg, #00bcd4, #0077ff) !important;
-    color: white !important;
-    border: none !important;
-    border-radius: 10px !important;
-    font-weight: 600 !important;
-    font-size: 0.95rem !important;
-    padding: 10px 20px !important;
-    box-shadow: 0 0 20px rgba(0,188,212,0.3) !important;
-    transition: all 0.2s !important;
-    letter-spacing: 0.01em !important;
-}
-.stButton > button:hover {
-    box-shadow: 0 0 32px rgba(0,188,212,0.5) !important;
-    transform: translateY(-1px) !important;
-}
-
-/* ── Inputs ── */
-.stTextInput > div > div > input, .stSelectbox > div > div {
-    background: #161b22 !important;
-    border: 1px solid rgba(0,220,255,0.15) !important;
-    border-radius: 10px !important;
-    color: #e6edf3 !important;
-    font-size: 0.9rem !important;
-}
-.stTextInput > div > div > input:focus {
-    border-color: rgba(0,220,255,0.5) !important;
-    box-shadow: 0 0 0 3px rgba(0,220,255,0.08) !important;
-}
-
-/* ── Tabs ── */
-[data-baseweb="tab-list"] {
-    background: transparent !important;
-    border-bottom: 1px solid rgba(0,220,255,0.1) !important;
-    gap: 4px !important;
-}
-[data-baseweb="tab"] {
-    background: transparent !important;
-    border-radius: 8px 8px 0 0 !important;
-    color: #6e7681 !important;
-    font-weight: 500 !important;
-    font-size: 0.9rem !important;
-    padding: 8px 16px !important;
-}
-[aria-selected="true"][data-baseweb="tab"] {
-    color: #00dcff !important;
-    border-bottom: 2px solid #00dcff !important;
-    background: rgba(0,220,255,0.04) !important;
-}
-
-/* ── Dataframe ── */
-[data-testid="stDataFrame"] {
-    border: 1px solid rgba(0,220,255,0.1) !important;
-    border-radius: 12px !important;
-    overflow: hidden !important;
-}
-
-/* ── Divider ── */
-hr {
-    border: none !important;
-    height: 1px !important;
-    background: linear-gradient(90deg, transparent, rgba(0,220,255,0.2), transparent) !important;
-    margin: 20px 0 !important;
-}
-
-/* ── Info / warning boxes ── */
-[data-testid="stAlert"] {
-    border-radius: 10px !important;
-    border-left-width: 3px !important;
-    background: rgba(13,17,23,0.8) !important;
-    backdrop-filter: blur(8px) !important;
-}
-
-/* ── Caption ── */
-.stCaption { color: #484f58 !important; font-size: 0.78rem !important; }
-
-/* ── Metric widget ── */
-[data-testid="stMetric"] {
-    background: rgba(0,220,255,0.03);
-    border: 1px solid rgba(0,220,255,0.1);
-    border-radius: 12px;
-    padding: 12px 16px;
-}
-[data-testid="stMetricValue"] {
-    color: #ffffff !important;
-    font-weight: 700 !important;
-}
-
-/* ── Scrollbar ── */
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: #0d1117; }
-::-webkit-scrollbar-thumb { background: rgba(0,220,255,0.2); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(0,220,255,0.4); }
+.metric-card.warn   { border-left-color: #FF9800; }
+.metric-card.danger { border-left-color: #F44336; }
+.metric-card.blue   { border-left-color: #2196F3; }
+.metric-val { font-size: 2rem; font-weight: 700; color: #fff; }
+.metric-lbl { font-size: 0.85rem; color: #aaa; margin-top: 4px; }
+.alert-reliable   { background:#1b3a1b; border:1px solid #4CAF50;
+    border-radius:8px; padding:10px 14px; color:#81c784; font-weight:600; }
+.alert-caution    { background:#3a2e1b; border:1px solid #FF9800;
+    border-radius:8px; padding:10px 14px; color:#ffb74d; font-weight:600; }
+.alert-unreliable { background:#3a1b1b; border:1px solid #F44336;
+    border-radius:8px; padding:10px 14px; color:#ef9a9a; font-weight:600; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -271,16 +65,6 @@ with st.sidebar:
     st.markdown("**Candidats générés :** 60 (38 MedChem-clean)")
     st.markdown("---")
     st.caption("Prototype de recherche — validation expérimentale requise")
-    # RDKit diagnostic
-    try:
-        from rdkit import Chem
-        _m = Chem.MolFromSmiles("c1ccccc1")
-        if _m is not None:
-            st.caption("✅ RDKit OK")
-        else:
-            st.caption("⚠️ RDKit installé mais MolFromSmiles échoue")
-    except ImportError:
-        st.caption("❌ RDKit non installé")
 
 
 # ═══════════════════════════════════════════
@@ -327,27 +111,21 @@ def load_csv(path):
 
 
 def mol_image_b64(smiles):
-    """Returns (base64_png, error_msg). error_msg is None on success."""
     try:
         from rdkit import Chem, RDLogger
         from rdkit.Chem import Draw
         from io import BytesIO
         import base64
         RDLogger.DisableLog("rdApp.*")
-        mol = Chem.MolFromSmiles(smiles, sanitize=True)
+        mol = Chem.MolFromSmiles(smiles)
         if mol is None:
-            mol = Chem.MolFromSmiles(smiles, sanitize=False)
-            if mol is None:
-                return None, f"RDKit: MolFromSmiles returned None pour: {smiles[:40]}"
-            Chem.SanitizeMol(mol, catchErrors=True)
-        img = Draw.MolToImage(mol, size=(300, 220))
+            return None
+        img = Draw.MolToImage(mol, size=(280, 200))
         buf = BytesIO()
         img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode(), None
-    except ImportError:
-        return None, "RDKit non disponible sur ce serveur"
-    except Exception as e:
-        return None, f"Erreur RDKit: {str(e)[:80]}"
+        return base64.b64encode(buf.getvalue()).decode()
+    except Exception:
+        return None
 
 
 def tanimoto_alert(smiles, smiles_map):
@@ -475,7 +253,7 @@ elif page == "🔬  Prédiction IC50":
     col_in, col_out = st.columns([1, 1])
 
     EXAMPLES = {
-        "Afatinib (EGFR inhibitor)": "CN(C)CCCOc1cc2ncnc(Nc3cccc(Cl)c3F)c2cc1OC",
+        "Afatinib (EGFR inhibitor)": "CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C1)C(=NC=N2)NC3=CC(=C(C=C3)F)Cl)OCC4CCCO4",
         "BRI-46 (généré — top candidat)": "O=S(=O)(c1ccc2ccccc2c1)N1CCNCC1",
         "BRI-12 (généré — SA=1.68)": "NS(=O)(=O)c1ccc(-c2cccc(O)c2)cc1",
         "Gra-1 (GraphGA #1, QED=0.872)": "CN1CCCN(C2CC2)CC(c2ccccc2NCCO)C1",
@@ -501,17 +279,14 @@ elif page == "🔬  Prédiction IC50":
             with st.spinner("Calcul…"):
 
                 # Structure 2D
-                img, img_err = mol_image_b64(smiles_input)
+                img = mol_image_b64(smiles_input)
                 if img:
                     st.markdown(
                         f'<img src="data:image/png;base64,{img}" '
-                        f'style="border-radius:8px;width:100%;max-width:300px;"/>',
+                        f'style="border-radius:8px;width:100%;max-width:280px;"/>',
                         unsafe_allow_html=True)
-                elif img_err and "non disponible" in img_err:
-                    # RDKit absent — afficher SMILES texte proprement
-                    st.info(f"🧪 Structure non affichable (RDKit indisponible sur ce serveur)\n\n`{smiles_input[:60]}`")
                 else:
-                    st.warning(f"⚠️ {img_err or 'Structure non affichable'}")
+                    st.error("SMILES invalide.")
 
                 # Alerte Tanimoto
                 st.markdown("**Domaine d'applicabilité**")
@@ -586,7 +361,7 @@ elif page == "💊  Bibliothèque moléculaire":
             cols = st.columns(3)
             for i, (_, row) in enumerate(df_cand.head(3).iterrows()):
                 with cols[i]:
-                    img, _ = mol_image_b64(row["smiles"])
+                    img = mol_image_b64(row["smiles"])
                     if img:
                         st.markdown(f'<img src="data:image/png;base64,{img}" '
                                     f'style="width:100%;border-radius:8px;"/>',
