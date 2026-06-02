@@ -319,14 +319,18 @@ def load_csv(path):
 def mol_image_b64(smiles):
     try:
         from rdkit import Chem, RDLogger
-        from rdkit.Chem import Draw
+        from rdkit.Chem import Draw, AllChem
         from io import BytesIO
         import base64
         RDLogger.DisableLog("rdApp.*")
-        mol = Chem.MolFromSmiles(smiles)
+        # Try with sanitize first, fallback without stereochemistry
+        mol = Chem.MolFromSmiles(smiles, sanitize=True)
         if mol is None:
-            return None
-        img = Draw.MolToImage(mol, size=(280, 200))
+            mol = Chem.MolFromSmiles(smiles, sanitize=False)
+            if mol is None:
+                return None
+            Chem.SanitizeMol(mol, catchErrors=True)
+        img = Draw.MolToImage(mol, size=(300, 220))
         buf = BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
@@ -459,7 +463,7 @@ elif page == "🔬  Prédiction IC50":
     col_in, col_out = st.columns([1, 1])
 
     EXAMPLES = {
-        "Afatinib (EGFR inhibitor)": "CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C1)C(=NC=N2)NC3=CC(=C(C=C3)F)Cl)OCC4CCCO4",
+        "Afatinib (EGFR inhibitor)": "CN(C)CCCOc1cc2ncnc(Nc3cccc(Cl)c3F)c2cc1OC",
         "BRI-46 (généré — top candidat)": "O=S(=O)(c1ccc2ccccc2c1)N1CCNCC1",
         "BRI-12 (généré — SA=1.68)": "NS(=O)(=O)c1ccc(-c2cccc(O)c2)cc1",
         "Gra-1 (GraphGA #1, QED=0.872)": "CN1CCCN(C2CC2)CC(c2ccccc2NCCO)C1",
