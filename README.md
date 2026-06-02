@@ -1,34 +1,51 @@
 ![Python](https://img.shields.io/badge/Python-3.11-blue.svg)
 ![License](https://img.shields.io/badge/license-MIT-green.svg)
-![Last update](https://img.shields.io/badge/last%20update-May%2031%202026-orange.svg)
+![Last update](https://img.shields.io/badge/last%20update-June%202%202026-orange.svg)
 
 # Twin — Multimodal QSAR + De Novo Drug Generation on CCLE
 
-> Multimodal drug response predictor (QSAR) + de novo molecule generator on CCLE.
+> Multimodal drug response predictor (QSAR) + de novo molecule generator on CCLE.  
 > **This is a research prototype, not a medical-grade digital twin.**
 
 ## TL;DR
 
-- Predicts cancer cell-line IC50 from drug SMILES + omics (GEx, CNA, mutations) using a GNN–VAE fusion model (Bi-Int).
-- Best honest performance: **Pearson r = 0.316** (leave-drug-out) — weak but statistically significant (p << 0.001).
-- XGBoost outperforms the deep model on LDO (r = 0.367). Deep learning benefit not yet justified at this data scale.
-- Two molecular generators (GraphGA + BRICS-DQN) produced 60 drug-like candidates; **38/60 pass all MedChem filters**, internal library diversity = **0.90**.
-- IC50 values predicted for generated molecules are **extrapolated out-of-distribution** and must not be taken as reliable potency estimates.
+- Predicts cancer cell-line IC50 from drug SMILES + omics (GEx 978, CNA 426, Mut 735) using a GNN–Quaternion-VAE–Bi-Int fusion model.
+- Best honest performance: **Pearson r = 0.316** (leave-drug-out, 95% CI [0.287–0.344]) — weak but statistically significant.
+- XGBoost outperforms the deep model on LDO (r = 0.367). Deep learning benefit not yet justified at current data scale.
+- Two molecular generators (GraphGA + BRICS-DQN): **38/60 candidates pass all MedChem filters**, internal diversity = **0.90**.
+- New (June 2026): model checkpointing, deterministic VAE inference, Gradient×Input biomarker attribution, MC Dropout uncertainty, Tanimoto applicability domain alerts.
+- IC50 predictions for generated molecules are **out-of-distribution extrapolations** — do not use as reliable potency estimates.
 
 ---
 
 ## Key results
 
-| Split | Model | Pearson r | 95% CI |
-|-------|-------|-----------|--------|
-| Random | Bi-Int (epoch 4) | **0.811** | [0.736, 0.886] |
-| Leave-Drug-Out | **XGBoost** | **0.367** | [0.338, 0.393] |
-| Leave-Drug-Out | Bi-Int (epoch 2) | 0.316 | [0.287, 0.344] |
-| Leave-Drug-Out | MLP (256→128) | 0.225 | [0.194, 0.255] |
-| Leave-Drug-Out | Ridge ECFP4+omics | 0.228 | [0.196, 0.256] |
-| Leave-Cell-Out | XGBoost | 0.824 | — |
+### QSAR prediction
 
-> Random split r = 0.811 is inflated (same drugs in train and test). LDO is the honest metric.
+| Split | Model | Pearson r | 95% CI | Notes |
+|-------|-------|-----------|--------|-------|
+| Random | Bi-Int (epoch 4) | **0.811** | [0.736, 0.886] | Optimistic — same drugs in train/val |
+| Leave-Drug-Out | **XGBoost** | **0.367** | [0.338, 0.393] | Best model on honest split |
+| Leave-Drug-Out | Bi-Int (epoch 2) | 0.316 | [0.287, 0.344] | Deep model, honest metric |
+| Leave-Drug-Out | Ridge ECFP4+omics | 0.228 | [0.196, 0.256] | Classical baseline |
+| Leave-Cell-Out | Bi-Int (epoch 4) | 0.766 | — | Partial run (6 epochs) |
+
+> Random split r = 0.811 measures interpolation, not generalisation. LDO is the honest metric.
+
+### Molecular generation
+
+| Generator | Candidates | MedChem clean | QED mean | SA mean | Internal diversity |
+|-----------|-----------|--------------|---------|---------|-------------------|
+| GraphGA | 10 | 10/10 (100%) | 0.833 | 2.76 | — |
+| BRICS-DQN (top-50) | 50 | 28/50 (56%) | — | — | — |
+| **Combined** | **60** | **38/60 (63%)** | — | — | **0.90** |
+
+### Reliability alerts (June 2026)
+
+| Alert | Method | Result on LDO val set |
+|-------|--------|----------------------|
+| Applicability domain | Tanimoto vs train drugs (Morgan FP r=2, 2048 bits) | 🔴 80% UNRELIABLE · 🟡 10% CAUTION · 🟢 10% RELIABLE |
+| MC Dropout uncertainty | N=30 stochastic passes, dropout=10% | 5.5% HIGH_UNCERTAINTY (σ > 0.198) |
 
 ---
 
@@ -37,13 +54,15 @@
 | | |
 |---|---|
 | ![Training curves](figures/02_training_curves.png) | ![Dashboard](figures/05_dashboard.png) |
-| *Fig 1 — Bi-Int training curves (random split, 4 epochs)* | *Fig 2 — Full results dashboard* |
-| ![Tanimoto](figures/06_tanimoto_distribution.png) | ![QED](figures/04_qed_lipinski.png) |
-| *Fig 3 — Tanimoto similarity vs CCLE drugs (GraphGA candidates)* | *Fig 4 — QED / MW / LogP for GraphGA top-10* |
-| ![Diversity](figures/08_internal_diversity.png) | |
-| *Fig 5 — Internal similarity heatmap (60 candidates, diversity = 0.90)* | |
+| *Fig 02 — Bi-Int training curves (random split, 4 epochs, r=0.811 at epoch 4)* | *Fig 05 — Full results dashboard* |
+| ![Tanimoto](figures/06_tanimoto_distribution.png) | ![Diversity](figures/08_internal_diversity.png) |
+| *Fig 06 — All candidates have Tanimoto < 0.30 vs CCLE drugs — structurally novel* | *Fig 08 — Internal similarity heatmap (60 candidates, diversity = 0.90)* |
+| ![ncRNA](figures/09_ncrna_importance.png) | ![Coding](figures/11_coding_biomarkers.png) |
+| *Fig 09 — ncRNA importance (Gradient×Input). H19 rank 61/76, GAS5 rank 70/76* | *Fig 11 — Coding gene importance. 0/20 canonical oncology markers in top-20 (LDO checkpoint)* |
+| ![Uncertainty](figures/12_uncertainty_distribution.png) | ![AppDomain](figures/13_applicability_domain.png) |
+| *Fig 12 — MC Dropout: 5.5% high-uncertainty pairs. Model overconfident at 10% dropout* | *Fig 13 — 80% of novel drugs are out-of-applicability-domain (Tanimoto < 0.4)* |
 
-See [docs/FIGURES_GUIDE.md](docs/FIGURES_GUIDE.md) for all figures and regeneration instructions.
+See [docs/FIGURE_INTERPRETATIONS.md](docs/FIGURE_INTERPRETATIONS.md) for expert-level interpretation of all 13 figures.
 
 ---
 
@@ -52,7 +71,21 @@ See [docs/FIGURES_GUIDE.md](docs/FIGURES_GUIDE.md) for all figures and regenerat
 ```bash
 git clone https://github.com/zdorsane/Twin && cd Twin
 conda env create -f env.yml && conda activate TwinCell   # or: pip install -r requirements.txt
-python src/fullPipeline.py --loss-mode cross_entropy --split-mode random --epochs 5
+
+# Train with best settings (LDO, early stopping, save checkpoint)
+python src/fullPipeline.py --mode pretrained --loss-mode cross_entropy \
+    --split-mode leave_drug_out --epochs 15 --early-stopping 3 \
+    --log-dir logs/my_run --no-ppo --save-model
+
+# Verify checkpoint integrity
+python scripts/test_model_loading.py --self-test
+python scripts/test_model_loading.py --weights logs/my_run/biint_ic50_model.weights.h5
+
+# Run interpretability and reliability analyses
+python scripts/ncrna_biomarker_analysis.py --weights logs/my_run/biint_ic50_model.weights.h5
+python scripts/coding_biomarker_analysis.py
+python scripts/applicability_domain.py
+python scripts/uncertainty_mc_dropout.py --weights logs/my_run/biint_ic50_model.weights.h5
 ```
 
 ---
@@ -60,14 +93,28 @@ python src/fullPipeline.py --loss-mode cross_entropy --split-mode random --epoch
 ## Architecture
 
 ```
-Drug SMILES ──► BRICS graph ──► GNN encoder ──────────────────────────────────┐
-                                                                               ├──► Bi-Int fusion ──► MLP ──► IC50
-Cell omics (GEx 978 + CNA 426 + Mut 735) ──► Quaternion VAE encoder ──────────┘
+Drug SMILES ──► BRICS graph ──► GNN encoder (ChEMBL pre-trained) ────────────────────┐
+                                                                                      │
+                                                                   ┌──────────────────┴──────┐
+                                                                   │   Bi-Int Blocks (×4)    │
+                                                                   │   Row-cross attention   │──► MLP ──► IC50
+                                                                   │   Col-cross attention   │
+                                                                   │   Triangular updates    │
+                                                                   └──────────────────┬──────┘
+                                                                                      │
+Cell omics ──► Quaternion VAE encoder ────────────────────────────────────────────────┘
+  GEx (978 top-variance genes)
+  CNA (426 top-variance regions)        latent z (128-d, deterministic at inference)
+  Mutations (735 top-mutated genes)
 
 Molecular generation:
-  BRICS fragments ──► DQN agent ──────────────────────────────────────────────┐
-                                                                               ├──► Top candidates ──► MedChem validation
-  Population of molecules ──► Genetic Algorithm (GraphGA) ────────────────────┘
+  BRICS fragments ──► DQN agent (RL) ──────────┐
+                                                ├──► MedChem validation ──► Top candidates
+  Population ──► GraphGA (genetic algorithm) ───┘
+
+Reliability layer:
+  New query drug ──► Tanimoto vs train drugs ──► 🔴/🟡/🟢 applicability alert
+  Forward passes (N=30, dropout ON) ──► MC Dropout uncertainty ──► σ alert
 ```
 
 ---
@@ -76,70 +123,74 @@ Molecular generation:
 
 ```
 Twin/
-├── README.md                        # This file
-├── LICENSE                          # MIT
-├── requirements.txt                 # Python dependencies
-├── env.yml                          # Conda environment
-│
-├── src/                             # Core model & generation code
-│   ├── fullPipeline.py              # Bi-Int model, training, splits
+├── src/
+│   ├── fullPipeline.py              # Bi-Int model, training, checkpointing, all splits
 │   ├── chembl_pretrain.py           # GNN pre-training on ChEMBL
 │   ├── baseline_models.py           # Ridge, RF, XGBoost, MLP baselines
 │   ├── brics_dqn_optimizer.py       # BRICS-DQN molecule generator
 │   └── graphga_biint_optimizer.py   # GraphGA molecule generator
 │
-├── scripts/                         # Utility & analysis scripts
-│   ├── molecular_validation.py      # MedChem validation (SA, PAINS, Brenk, Tanimoto)
-│   ├── tanimoto_analysis.py         # Tanimoto vs CCLE drugs
+├── scripts/
+│   ├── ncrna_biomarker_analysis.py  # Gradient×Input attribution on ncRNA features
+│   ├── coding_biomarker_analysis.py # Gradient×Input attribution on coding genes
+│   ├── applicability_domain.py      # Tanimoto-based applicability domain alert
+│   ├── uncertainty_mc_dropout.py    # MC Dropout uncertainty (N=30 passes)
+│   ├── test_model_loading.py        # Checkpoint save/load integrity test
+│   ├── molecular_validation.py      # MedChem: SA, PAINS, Brenk, Lipinski, diversity
 │   ├── bootstrap_ci.py              # Bootstrap 95% CI on Pearson r
+│   ├── tanimoto_analysis.py         # Tanimoto vs CCLE drugs for generated molecules
 │   ├── ldo_ablation.py              # Ablation study: 5 LDO improvement levers
-│   └── smiles_augmentation.py       # Random SMILES enumeration (data augmentation)
+│   ├── final_comparison.py          # Full comparison table (all models × all splits)
+│   └── _ccle_loader.py              # Shared CCLE loader using NPZ cache
 │
 ├── notebooks/
-│   └── evaluation.ipynb             # Full evaluation: results, figures, analysis
+│   └── evaluation.ipynb             # Full evaluation: 10 sections, fallback values
 │
-├── figures/                         # All PNG figures (auto-committed)
+├── figures/                         # Figures 01–13 (auto-committed PNG)
 │
-├── Dataset/                         # Small CSVs only (large files gitignored)
-│   ├── baseline_results_with_CI.csv
-│   ├── graphga_tanimoto_vs_ccle.csv
-│   ├── molecular_validation_report.csv
-│   └── ccle_drug_smiles.csv
+├── Dataset/
+│   ├── baseline_results_with_CI.csv            # All baselines × splits × CI
+│   ├── ncrna_biomarker_importance.csv           # ncRNA attribution scores
+│   ├── coding_biomarker_importance.csv          # Coding gene attribution scores
+│   ├── applicability_domain.csv                 # Per-drug Tanimoto + alert
+│   ├── uncertainty_mc_dropout.csv               # Per-pair MC uncertainty + alert
+│   ├── molecular_validation_report.csv          # 60 candidates × 24 MedChem metrics
+│   └── ccle_drug_smiles.csv                     # 201 drugs with SMILES
 │
 ├── docs/
+│   ├── FIGURE_INTERPRETATIONS.md    # ★ Expert interpretation of all 13 figures
 │   ├── DATA.md                      # CCLE source, dimensions, preprocessing, splits
-│   ├── FIGURES_GUIDE.md             # What each figure shows and how to regenerate
+│   ├── FIGURES_GUIDE.md             # Figure list and regeneration commands
 │   ├── TECHNICAL.md                 # Architecture details, hyperparameters
-│   ├── DQN_HISTORY.md               # DQN version history v1→v5.1
-│   └── rapport_31mai2026.md         # Session report 31 May 2026 (expert-level)
+│   └── rapport_31mai2026.md         # Session report 31 May 2026
 │
-└── reports/                         # Dated session reports
+└── reports/
+    ├── session_report_2026-06-01.md # Session report 1 June 2026
+    └── [other dated reports]
 ```
 
 ---
 
 ## Limitations
 
-- **LDO r = 0.316:** statistically significant but weak. Generated-molecule IC50 predictions are unreliable for novel structures.
-- **XGBoost outperforms Bi-Int on LDO:** deep learning adds no benefit yet at 16k training triplets. Planned fixes: early stopping, stronger regularisation, SMILES augmentation, full 100k dataset.
-- **20k subsampled training set:** full CCLE has 103k triplets; RAM/GPU constraints limit current runs.
-- **65 drugs without SMILES:** 24% of CCLE drugs are excluded from training due to incomplete PubChem mapping.
-- **BRICS-DQN validity ~60%:** one in two generated molecules is chemically invalid. Reward-function valence penalties are the next step.
-- **SA score is a heuristic:** actual synthetic difficulty should be verified with retrosynthesis tools (AiZynthFinder, ASKCOS).
-- **Tanimoto < 0.35 for all 60 candidates vs CCLE drugs:** high novelty = high ADMET uncertainty. In silico ADMET (SwissADME, pkCSM) recommended before any wet-lab work.
+- **LDO r = 0.316 < XGBoost r = 0.367:** deep learning not yet better than XGBoost at 16k training triplets. Planned: early stopping, L2 regularisation, SMILES augmentation, full 103k dataset.
+- **80% of novel drugs are out-of-applicability-domain** (Tanimoto < 0.4): always check applicability domain before trusting any IC50 prediction on a new molecule.
+- **MC Dropout underestimates uncertainty** (5.5% flagged at 10% dropout): combine with Tanimoto alert — a model can be confident and wrong simultaneously when extrapolating.
+- **Biomarker attributions computed on LDO checkpoint (r=0.210):** canonical oncology markers (EGFR, KRAS, TP53) not yet in top-20. To be recomputed on random checkpoint (r=0.811).
+- **65/266 drugs without SMILES:** excluded from all molecular analyses.
+- **BRICS-DQN validity ~60%:** one in two generated molecules chemically invalid. Valence penalty next improvement.
+- **20k subsampled training set:** full CCLE has 103k triplets; RAM/GPU constraints apply.
 
 ---
 
 ## Data
 
-See [docs/DATA.md](docs/DATA.md) for full description of CCLE source, preprocessing, and splits.
-
-Large dataset files (>100 MB) are gitignored. Download from [DepMap portal](https://depmap.org/portal/download/).
+See [docs/DATA.md](docs/DATA.md). Large files (>100 MB) are gitignored — download from [DepMap portal](https://depmap.org/portal/download/).
 
 ---
 
 ## Citation + License + Contact
 
 - Research prototype. MIT License — see [LICENSE](LICENSE).
-- If you use this code, please cite the CCLE paper: Barretina et al., *Nature* 2012.
+- CCLE dataset: Barretina et al., *Nature* 2012.
 - Contact / issues: https://github.com/zdorsane/Twin/issues
