@@ -8,7 +8,7 @@ Usage:
 
 Outputs:
     Dataset/graphga_tanimoto_vs_ccle.csv
-    figures/06_tanimoto_distribution.png
+    figures/phase2_validation_ablation/06_tanimoto_distribution.png
 """
 
 import os
@@ -33,7 +33,7 @@ RDLogger.DisableLog("rdApp.*")
 CANDIDATES_CSV = "graphga_top_candidates.csv"
 CCLE_SMILES    = "Dataset/ccle_drug_smiles.csv"
 OUT_CSV        = "Dataset/graphga_tanimoto_vs_ccle.csv"
-FIG_PATH       = "figures/06_tanimoto_distribution.png"
+FIG_PATH       = "figures/phase2_validation_ablation/06_tanimoto_distribution.png"
 
 FP_RADIUS = 2
 FP_NBITS  = 2048

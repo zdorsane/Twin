@@ -4,7 +4,7 @@ LDO Ablation Study — compare improvement levers for Leave-Drug-Out generalisat
 Runs each configuration via subprocess, reads the resulting val_curves.json,
 then produces:
   • Dataset/ldo_improvement_ablation.csv
-  • figures/07_ldo_ablation.png
+  • figures/phase2_validation_ablation/07_ldo_ablation.png
 
 Usage:
     python3 scripts/ldo_ablation.py [--dry-run] [--skip-runs]
@@ -266,7 +266,7 @@ def main():
 
     # Save outputs
     save_csv(df, "Dataset/ldo_improvement_ablation.csv")
-    save_figure(df, "figures/07_ldo_ablation.png")
+    save_figure(df, "figures/phase2_validation_ablation/07_ldo_ablation.png")
 
     print("\n[Done] Ablation complete.")
 

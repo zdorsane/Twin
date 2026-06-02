@@ -5,7 +5,7 @@ MC Dropout uncertainty (N=30 passes). Uses exact same gex_mat as training.
 
 Outputs:
   Dataset/uncertainty_mc_dropout.csv
-  figures/12_uncertainty_distribution.png
+  figures/phase3_interpretability_reliability/12_uncertainty_distribution.png
 """
 
 import argparse, os, sys, warnings, json
@@ -116,7 +116,7 @@ def main():
     ], fontsize=9)
 
     plt.tight_layout()
-    p12 = os.path.join(ROOT, "figures/12_uncertainty_distribution.png")
+    p12 = os.path.join(ROOT, "figures/phase3_interpretability_reliability/12_uncertainty_distribution.png")
     fig.savefig(p12, dpi=150); plt.close()
     print(f"[Fig 12] → {p12}")
 

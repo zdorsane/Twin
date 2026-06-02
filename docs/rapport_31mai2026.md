@@ -237,19 +237,19 @@ une estimation bayésienne robuste. Combinaison obligatoire avec l'alerte Tanimo
 
 | Figure | Fichier | Description |
 |--------|---------|-------------|
-| 01 | `figures/01_molecular_structures.png` | Structures RDKit 2D des candidats GraphGA |
-| 02 | `figures/02_training_curves.png` | Courbes d'entraînement QSAR (random split) |
-| 03 | `figures/03_dqn_reward.png` | Reward BRICS-DQN sur 5 000 épisodes |
-| 04 | `figures/04_qed_lipinski.png` | QED et propriétés Lipinski (GraphGA top-10) |
-| 05 | `figures/05_dashboard.png` | Dashboard synthétique |
-| 06 | `figures/06_tanimoto_distribution.png` | Tanimoto candidats vs CCLE |
-| 07 | `figures/07_ldo_ablation.png` | Ablation LDO : Bi-Int vs baselines |
-| 08 | `figures/08_internal_diversity.png` | Heatmap diversité interne 60 candidats |
-| 09 | `figures/09_ncrna_importance.png` | ★ Top-20 ncRNA par importance Gradient×Input |
-| 10 | `figures/10_ncrna_vs_drugs.png` | ★ Heatmap importance ncRNA × drogues |
-| 11 | `figures/11_coding_biomarkers.png` | ★ Top-20 gènes codants, biomarqueurs surlignés |
-| 12 | `figures/12_uncertainty_distribution.png` | ★ MC Dropout : distribution σ et IC 95% |
-| 13 | `figures/13_applicability_domain.png` | ★ Domaine d'applicabilité Tanimoto |
+| 01 | `figures/phase1_training_generation/01_molecular_structures.png` | Structures RDKit 2D des candidats GraphGA |
+| 02 | `figures/phase1_training_generation/02_training_curves.png` | Courbes d'entraînement QSAR (random split) |
+| 03 | `figures/phase1_training_generation/03_dqn_reward.png` | Reward BRICS-DQN sur 5 000 épisodes |
+| 04 | `figures/phase1_training_generation/04_qed_lipinski.png` | QED et propriétés Lipinski (GraphGA top-10) |
+| 05 | `figures/phase1_training_generation/05_dashboard.png` | Dashboard synthétique |
+| 06 | `figures/phase2_validation_ablation/06_tanimoto_distribution.png` | Tanimoto candidats vs CCLE |
+| 07 | `figures/phase2_validation_ablation/07_ldo_ablation.png` | Ablation LDO : Bi-Int vs baselines |
+| 08 | `figures/phase2_validation_ablation/08_internal_diversity.png` | Heatmap diversité interne 60 candidats |
+| 09 | `figures/phase3_interpretability_reliability/09_ncrna_importance.png` | ★ Top-20 ncRNA par importance Gradient×Input |
+| 10 | `figures/phase3_interpretability_reliability/10_ncrna_vs_drugs.png` | ★ Heatmap importance ncRNA × drogues |
+| 11 | `figures/phase3_interpretability_reliability/11_coding_biomarkers.png` | ★ Top-20 gènes codants, biomarqueurs surlignés |
+| 12 | `figures/phase3_interpretability_reliability/12_uncertainty_distribution.png` | ★ MC Dropout : distribution σ et IC 95% |
+| 13 | `figures/phase3_interpretability_reliability/13_applicability_domain.png` | ★ Domaine d'applicabilité Tanimoto |
 
 ★ = nouvelles figures (1er juin 2026)
 

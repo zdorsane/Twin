@@ -5,7 +5,7 @@ Attribution on coding genes (978 − ncRNA), reuses GxI cache from ncrna script.
 
 Outputs:
   Dataset/coding_biomarker_importance.csv
-  figures/11_coding_biomarkers.png
+  figures/phase3_interpretability_reliability/11_coding_biomarkers.png
 """
 
 import argparse, os, sys, warnings
@@ -97,7 +97,7 @@ def main():
         mpatches.Patch(color="#aec7e8",  label="Gène codant (non annoté)"),
     ], loc="lower right", fontsize=10)
     plt.tight_layout()
-    p11 = os.path.join(ROOT, "figures/11_coding_biomarkers.png")
+    p11 = os.path.join(ROOT, "figures/phase3_interpretability_reliability/11_coding_biomarkers.png")
     fig.savefig(p11, dpi=150); plt.close()
     print(f"[Fig 11] → {p11}")
 

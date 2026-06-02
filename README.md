@@ -53,13 +53,13 @@
 
 | | |
 |---|---|
-| ![Training curves](figures/02_training_curves.png) | ![Dashboard](figures/05_dashboard.png) |
+| ![Training curves](figures/phase1_training_generation/02_training_curves.png) | ![Dashboard](figures/phase1_training_generation/05_dashboard.png) |
 | *Fig 02 — Bi-Int training curves (random split, 4 epochs, r=0.811 at epoch 4)* | *Fig 05 — Full results dashboard* |
-| ![Tanimoto](figures/06_tanimoto_distribution.png) | ![Diversity](figures/08_internal_diversity.png) |
+| ![Tanimoto](figures/phase2_validation_ablation/06_tanimoto_distribution.png) | ![Diversity](figures/phase2_validation_ablation/08_internal_diversity.png) |
 | *Fig 06 — All candidates have Tanimoto < 0.30 vs CCLE drugs — structurally novel* | *Fig 08 — Internal similarity heatmap (60 candidates, diversity = 0.90)* |
-| ![ncRNA](figures/09_ncrna_importance.png) | ![Coding](figures/11_coding_biomarkers.png) |
+| ![ncRNA](figures/phase3_interpretability_reliability/09_ncrna_importance.png) | ![Coding](figures/phase3_interpretability_reliability/11_coding_biomarkers.png) |
 | *Fig 09 — ncRNA importance (Gradient×Input). H19 rank 61/76, GAS5 rank 70/76* | *Fig 11 — Coding gene importance. 0/20 canonical oncology markers in top-20 (LDO checkpoint)* |
-| ![Uncertainty](figures/12_uncertainty_distribution.png) | ![AppDomain](figures/13_applicability_domain.png) |
+| ![Uncertainty](figures/phase3_interpretability_reliability/12_uncertainty_distribution.png) | ![AppDomain](figures/phase3_interpretability_reliability/13_applicability_domain.png) |
 | *Fig 12 — MC Dropout: 5.5% high-uncertainty pairs. Model overconfident at 10% dropout* | *Fig 13 — 80% of novel drugs are out-of-applicability-domain (Tanimoto < 0.4)* |
 
 See [docs/FIGURE_INTERPRETATIONS.md](docs/FIGURE_INTERPRETATIONS.md) for expert-level interpretation of all 13 figures.

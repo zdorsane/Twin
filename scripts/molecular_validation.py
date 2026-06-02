@@ -9,7 +9,7 @@ Sources:
 
 Outputs:
   - Dataset/molecular_validation_report.csv
-  - figures/08_internal_diversity.png
+  - figures/phase2_validation_ablation/08_internal_diversity.png
 
 Sections:
   1. Tanimoto similarity vs CCLE drugs

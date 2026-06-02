@@ -10,11 +10,11 @@ README renders them on GitHub without running any code.
 
 | File | Generator | What it shows |
 |------|-----------|---------------|
-| [`figures/02_training_curves.png`](../figures/02_training_curves.png) | `notebooks/evaluation.ipynb` cell 4 | Bi-Int QSAR training: train/val RMSE and Pearson r over 4 epochs (random split). Overfitting visible from epoch 3 in the LDO variant. |
-| [`figures/05_dashboard.png`](../figures/05_dashboard.png) | `notebooks/evaluation.ipynb` cell 9 | Full-session dashboard: RMSE curves, Pearson r by epoch, baseline bar chart, DQN reward, QED bar chart, ChEMBL pre-training. |
-| [`figures/06_tanimoto_distribution.png`](../figures/06_tanimoto_distribution.png) | `scripts/tanimoto_analysis.py` | Distribution of max Tanimoto similarity vs 184 CCLE drugs for GraphGA candidates. All candidates have max Tanimoto < 0.30 (structurally novel). |
-| [`figures/04_qed_lipinski.png`](../figures/04_qed_lipinski.png) | `notebooks/evaluation.ipynb` cell 7 | QED, MW, LogP bar charts for GraphGA top-10 candidates. All pass Lipinski Ro5. |
-| [`figures/08_internal_diversity.png`](../figures/08_internal_diversity.png) | `scripts/molecular_validation.py` | Tanimoto similarity heatmap between all 60 generated candidates. Mean intra-library similarity = 0.10 (diversity = 0.90). |
+| [`figures/phase1_training_generation/02_training_curves.png`](../figures/phase1_training_generation/02_training_curves.png) | `notebooks/evaluation.ipynb` cell 4 | Bi-Int QSAR training: train/val RMSE and Pearson r over 4 epochs (random split). Overfitting visible from epoch 3 in the LDO variant. |
+| [`figures/phase1_training_generation/05_dashboard.png`](../figures/phase1_training_generation/05_dashboard.png) | `notebooks/evaluation.ipynb` cell 9 | Full-session dashboard: RMSE curves, Pearson r by epoch, baseline bar chart, DQN reward, QED bar chart, ChEMBL pre-training. |
+| [`figures/phase2_validation_ablation/06_tanimoto_distribution.png`](../figures/phase2_validation_ablation/06_tanimoto_distribution.png) | `scripts/tanimoto_analysis.py` | Distribution of max Tanimoto similarity vs 184 CCLE drugs for GraphGA candidates. All candidates have max Tanimoto < 0.30 (structurally novel). |
+| [`figures/phase1_training_generation/04_qed_lipinski.png`](../figures/phase1_training_generation/04_qed_lipinski.png) | `notebooks/evaluation.ipynb` cell 7 | QED, MW, LogP bar charts for GraphGA top-10 candidates. All pass Lipinski Ro5. |
+| [`figures/phase2_validation_ablation/08_internal_diversity.png`](../figures/phase2_validation_ablation/08_internal_diversity.png) | `scripts/molecular_validation.py` | Tanimoto similarity heatmap between all 60 generated candidates. Mean intra-library similarity = 0.10 (diversity = 0.90). |
 
 ---
 
@@ -22,13 +22,13 @@ README renders them on GitHub without running any code.
 
 | File | Cell | What it shows |
 |------|------|---------------|
-| `figures/nb_01_ccle_summary.png` | cell 2 | CCLE dataset summary: SMILES coverage pie, omics feature dimensions, train/val split. |
-| `figures/nb_02_chembl_pretrain.png` | cell 3 | ChEMBL GNN pre-training: 10-epoch RMSE/MAE/loss curves. Best at epoch 9 (val RMSE = 0.2187). |
-| `figures/nb_03_qsar_random.png` | cell 4 | Bi-Int QSAR random split: RMSE, Pearson r, gradient norm per epoch. |
-| `figures/nb_04_qsar_ldo.png` | cell 5 | Bi-Int LDO: RMSE overfitting zone + Pearson r bar chart vs all classical baselines. |
-| `figures/nb_05_baselines.png` | cell 6 | All 5 models × 3 splits (Random / LDO / LCO) Pearson r bar charts. |
-| `figures/nb_07_dqn_reward.png` | cell 8 | BRICS-DQN reward over 5,000 episodes: raw scatter, 100-episode block means, validity rate. |
-| `figures/nb_08_dashboard.png` | cell 9 | Same as `05_dashboard.png` with higher resolution layout. |
+| `figures/phase1_training_generation/nb_01_ccle_summary.png` | cell 2 | CCLE dataset summary: SMILES coverage pie, omics feature dimensions, train/val split. |
+| `figures/phase1_training_generation/nb_02_chembl_pretrain.png` | cell 3 | ChEMBL GNN pre-training: 10-epoch RMSE/MAE/loss curves. Best at epoch 9 (val RMSE = 0.2187). |
+| `figures/phase1_training_generation/nb_03_qsar_random.png` | cell 4 | Bi-Int QSAR random split: RMSE, Pearson r, gradient norm per epoch. |
+| `figures/phase1_training_generation/nb_04_qsar_ldo.png` | cell 5 | Bi-Int LDO: RMSE overfitting zone + Pearson r bar chart vs all classical baselines. |
+| `figures/phase1_training_generation/nb_05_baselines.png` | cell 6 | All 5 models × 3 splits (Random / LDO / LCO) Pearson r bar charts. |
+| `figures/phase1_training_generation/nb_07_dqn_reward.png` | cell 8 | BRICS-DQN reward over 5,000 episodes: raw scatter, 100-episode block means, validity rate. |
+| `figures/phase1_training_generation/nb_08_dashboard.png` | cell 9 | Same as `05_dashboard.png` with higher resolution layout. |
 
 ---
 

@@ -37,7 +37,7 @@ baselines classiques, et les premières visualisations des molécules générée
 ---
 
 ### Figure 01 — Structures 2D des candidats GraphGA
-**`figures/01_molecular_structures.png`** | Généré par : `notebooks/evaluation.ipynb`
+**`figures/phase1_training_generation/01_molecular_structures.png`** | Généré par : `notebooks/evaluation.ipynb`
 
 **Ce que montre la figure :** représentations RDKit 2D des 10 meilleures molécules
 générées par l'algorithme génétique GraphGA, annotées avec leur QED et score composite.
@@ -53,7 +53,7 @@ favorable pour des interactions avec des sites de liaison polaires (kinases, HDA
 ---
 
 ### Figure 02 — Courbes d'entraînement QSAR (split random)
-**`figures/02_training_curves.png`** | Généré par : `notebooks/evaluation.ipynb`
+**`figures/phase1_training_generation/02_training_curves.png`** | Généré par : `notebooks/evaluation.ipynb`
 
 **Ce que montre la figure :** évolution de la RMSE train/validation et du coefficient
 de Pearson r par epoch sur le split random (4 epochs).
@@ -78,7 +78,7 @@ donc la mémorisation, pas la généralisation.
 ---
 
 ### Figure 03 — Reward BRICS-DQN sur 5 000 épisodes
-**`figures/03_dqn_reward.png`** | Généré par : `notebooks/evaluation.ipynb`
+**`figures/phase1_training_generation/03_dqn_reward.png`** | Généré par : `notebooks/evaluation.ipynb`
 
 **Ce que montre la figure :** évolution de la récompense de l'agent DQN, avec les
 moyennes par blocs de 100 épisodes et le taux de validité chimique.
@@ -94,7 +94,7 @@ pénalité de valence dans la fonction de récompense est la prochaine améliora
 ---
 
 ### Figure 04 — Distribution QED et propriétés Lipinski (GraphGA top-10)
-**`figures/04_qed_lipinski.png`** | Généré par : `notebooks/evaluation.ipynb`
+**`figures/phase1_training_generation/04_qed_lipinski.png`** | Généré par : `notebooks/evaluation.ipynb`
 
 **Ce que montre la figure :** QED, poids moléculaire (MW) et logP des 10 candidats
 GraphGA, comparés aux limites de la règle de Lipinski.
@@ -111,7 +111,7 @@ le risque d'échec ADMET précoce.
 ---
 
 ### Figure 05 — Dashboard synthétique
-**`figures/05_dashboard.png`** | Généré par : `notebooks/evaluation.ipynb`
+**`figures/phase1_training_generation/05_dashboard.png`** | Généré par : `notebooks/evaluation.ipynb`
 
 **Ce que montre la figure :** tableau de bord résumant en un panneau unique les
 métriques clés — courbes d'entraînement, comparaison baselines, reward DQN,
@@ -126,7 +126,7 @@ doivent être lues ensemble pour former un jugement équilibré.
 ---
 
 ### Figures notebook (nb\_01–08)
-**`figures/nb_01_ccle_summary.png`** à **`figures/nb_08_dashboard.png`**
+**`figures/phase1_training_generation/nb_01_ccle_summary.png`** à **`figures/phase1_training_generation/nb_08_dashboard.png`**
 Généré par : `notebooks/evaluation.ipynb`
 
 Versions haute résolution et détaillées des analyses principales :
@@ -149,7 +149,7 @@ SA score, diversité interne) et analyser les leviers d'amélioration LDO.
 ---
 
 ### Figure 06 — Distribution Tanimoto des candidats vs drogues CCLE
-**`figures/06_tanimoto_distribution.png`** | Généré par : `scripts/tanimoto_analysis.py`
+**`figures/phase2_validation_ablation/06_tanimoto_distribution.png`** | Généré par : `scripts/tanimoto_analysis.py`
 
 **Ce que montre la figure :** pour chaque candidat GraphGA (top-10), le Tanimoto
 maximum calculé avec les 184 drogues CCLE ayant un SMILES valide (Morgan FP, rayon 2,
@@ -168,7 +168,7 @@ des valeurs absolues fiables.
 ---
 
 ### Figure 07 — Ablation LDO : configurations Bi-Int vs baselines
-**`figures/07_ldo_ablation.png`** | Généré par : `scripts/ldo_ablation.py`
+**`figures/phase2_validation_ablation/07_ldo_ablation.png`** | Généré par : `scripts/ldo_ablation.py`
 
 **Ce que montre la figure :** comparaison Pearson r LDO entre le Bi-Int en
 configuration baseline et les modèles de référence. Note : les 4 configurations
@@ -194,7 +194,7 @@ complexification de l'architecture.
 ---
 
 ### Figure 08 — Heatmap de diversité interne (60 candidats)
-**`figures/08_internal_diversity.png`** | Généré par : `scripts/molecular_validation.py`
+**`figures/phase2_validation_ablation/08_internal_diversity.png`** | Généré par : `scripts/molecular_validation.py`
 
 **Ce que montre la figure :** matrice symétrique 60×60 de similarité Tanimoto entre
 tous les candidats générés (10 GraphGA + 50 BRICS-DQN top-reward). Couleurs chaudes
@@ -236,7 +236,7 @@ LDO (r = 0.210, epoch 1).
 ---
 
 ### Figure 09 — Importance des transcrits non-codants (ncRNA)
-**`figures/09_ncrna_importance.png`** | Généré par : `scripts/ncrna_biomarker_analysis.py`
+**`figures/phase3_interpretability_reliability/09_ncrna_importance.png`** | Généré par : `scripts/ncrna_biomarker_analysis.py`
 
 **Méthode :** Gradient × Input sur le vecteur GEx (978 dimensions). Pour chaque
 paire de validation (drogue *d*, lignée *c*), le gradient de la prédiction IC50 par
@@ -277,7 +277,7 @@ validation biologique de l'apprentissage.
 ---
 
 ### Figure 10 — Heatmap importance ncRNA × drogues
-**`figures/10_ncrna_vs_drugs.png`** | Généré par : `scripts/ncrna_biomarker_analysis.py`
+**`figures/phase3_interpretability_reliability/10_ncrna_vs_drugs.png`** | Généré par : `scripts/ncrna_biomarker_analysis.py`
 
 **Ce que montre la figure :** matrice (top-15 drogues × top-10 ncRNA), valeurs
 normalisées par colonne. Couleur chaude = importance relative élevée de ce ncRNA
@@ -295,7 +295,7 @@ discriminantes.
 ---
 
 ### Figure 11 — Importance des gènes codants (top-20)
-**`figures/11_coding_biomarkers.png`** | Généré par : `scripts/coding_biomarker_analysis.py`
+**`figures/phase3_interpretability_reliability/11_coding_biomarkers.png`** | Généré par : `scripts/coding_biomarker_analysis.py`
 
 **Méthode :** même Gradient × Input que Figure 09, restreint aux 902 gènes codants
 (978 − 76 ncRNA). Biomarqueurs oncologiques canoniques surlignés en rouge
@@ -331,7 +331,7 @@ encore convergé vers les mécanismes clés.
 ---
 
 ### Figure 12 — Incertitude MC Dropout
-**`figures/12_uncertainty_distribution.png`** | Généré par : `scripts/uncertainty_mc_dropout.py`
+**`figures/phase3_interpretability_reliability/12_uncertainty_distribution.png`** | Généré par : `scripts/uncertainty_mc_dropout.py`
 
 **Méthode :** 200 paires de validation, N = 30 passages forward avec `training=True`
 (dropout = 10 % actif). Calcul de σ (écart-type), IC 95 % (percentiles 2.5–97.5)
@@ -366,7 +366,7 @@ d'applicabilité. Les deux métriques sont complémentaires et non substituables
 ---
 
 ### Figure 13 — Domaine d'applicabilité (Tanimoto)
-**`figures/13_applicability_domain.png`** | Généré par : `scripts/applicability_domain.py`
+**`figures/phase3_interpretability_reliability/13_applicability_domain.png`** | Généré par : `scripts/applicability_domain.py`
 
 **Méthode :** pour chaque drogue de validation LDO (40 drogues), calcul du Tanimoto
 maximum avec les 161 drogues d'entraînement (Morgan FP, rayon 2, 2048 bits).

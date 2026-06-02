@@ -7,8 +7,8 @@ Uses exact same gex_mat as training (from NPZ cache).
 Outputs:
   Dataset/ncrna_biomarker_importance.csv
   Dataset/gex_attrs_cache.npy          (reused by coding_biomarker_analysis.py)
-  figures/09_ncrna_importance.png
-  figures/10_ncrna_vs_drugs.png
+  figures/phase3_interpretability_reliability/09_ncrna_importance.png
+  figures/phase3_interpretability_reliability/10_ncrna_vs_drugs.png
 """
 
 import argparse, os, sys, warnings
@@ -151,7 +151,7 @@ def main():
                         xy=(row["importance"], i), xytext=(row["importance"] * 0.05, i),
                         fontsize=7, va="center", color="#555555")
     plt.tight_layout()
-    p09 = os.path.join(ROOT, "figures/09_ncrna_importance.png")
+    p09 = os.path.join(ROOT, "figures/phase3_interpretability_reliability/09_ncrna_importance.png")
     fig.savefig(p09, dpi=150); plt.close()
     print(f"[Fig 09] → {p09}")
 
@@ -183,7 +183,7 @@ def main():
                      fontsize=11, fontweight="bold")
         plt.colorbar(im, ax=ax, label="Importance normalisée")
         plt.tight_layout()
-        p10 = os.path.join(ROOT, "figures/10_ncrna_vs_drugs.png")
+        p10 = os.path.join(ROOT, "figures/phase3_interpretability_reliability/10_ncrna_vs_drugs.png")
         fig.savefig(p10, dpi=150); plt.close()
         print(f"[Fig 10] → {p10}")
 

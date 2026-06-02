@@ -5,7 +5,7 @@ Tanimoto-based applicability domain for validation drugs.
 
 Outputs:
   Dataset/applicability_domain.csv
-  figures/13_applicability_domain.png
+  figures/phase3_interpretability_reliability/13_applicability_domain.png
 
 Usage:
   python3 scripts/applicability_domain.py
@@ -142,7 +142,7 @@ def main():
                  fontsize=11, fontweight="bold")
     ax.legend(fontsize=9)
     plt.tight_layout()
-    fig13 = os.path.join(ROOT, "figures/13_applicability_domain.png")
+    fig13 = os.path.join(ROOT, "figures/phase3_interpretability_reliability/13_applicability_domain.png")
     fig.savefig(fig13, dpi=150)
     plt.close()
     print(f"[Fig 13] Saved → {fig13}")
