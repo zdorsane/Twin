@@ -1,5 +1,5 @@
 # Interprétation des figures — Projet Twin
-## Guide expert : ce que montrent les figures 01–13
+## Guide expert : figures 01–13 organisées par phase de travail
 
 **Projet :** Twin — Prédicteur multimodal de réponse aux drogues (CCLE)  
 **Auteur :** Zied Dorsane | **Superviseur :** M. Marouane  
@@ -8,42 +8,55 @@
 
 ---
 
-## Vue d'ensemble du projet
+## Contexte général
 
-Le modèle **Bi-Int** (Bipartite Interaction Transformer) prédit la concentration
-inhibitrice à 50 % (IC50, log µM) d'une drogue sur une lignée cellulaire cancéreuse,
-à partir de deux sources d'information :
-
-1. **La structure chimique de la drogue** : encodée par un GNN (Graph Neural Network)
-   appliqué au graphe moléculaire BRICS, pré-entraîné sur ChEMBL.
-2. **Le profil omique de la lignée** : 978 gènes d'expression (GEx top-variance),
-   426 gènes de variation du nombre de copies (CNA), 735 gènes mutés — fusionnés via
-   un VAE quaternionique en un vecteur latent de dimension 128.
-
-Les deux représentations sont fusionnées par des blocs d'**attention croisée
-bipartite** (Bi-Int), puis un MLP prédit le log-IC50 final.
+Le modèle **Bi-Int** prédit le log-IC50 (µM) d'une drogue sur une lignée cellulaire
+cancéreuse à partir de deux entrées : la structure chimique de la drogue (GNN pré-entraîné
+sur ChEMBL) et le profil omique de la lignée (VAE quaternionique sur 978 GEx + 426 CNA +
+735 mutations). Les deux représentations sont fusionnées par 4 blocs d'attention croisée
+bipartite (Bi-Int). **9 255 070 paramètres entraînables.**
 
 **Dataset :** CCLE Broad 2019 — 647 lignées × 201 drogues avec SMILES → 103 477
-triplets valides (drogue, lignée, IC50), sous-échantillonnés à 20 000 pour les
-contraintes mémoire.
+triplets valides, sous-échantillonnés à 20 000 pour les contraintes mémoire.
 
-**Splits d'évaluation :**
-- **Random :** drogues et lignées partagées entre train et validation — mesure
-  l'interpolation.
-- **Leave-Drug-Out (LDO) :** drogues de validation jamais vues à l'entraînement —
-  mesure la généralisation structurelle, c'est la métrique honnête.
-- **Leave-Cell-Out (LCO) :** lignées de validation jamais vues à l'entraînement —
-  mesure la généralisation omique.
+**Trois splits d'évaluation :**
+- **Random :** train et val partagent les mêmes drogues et lignées → mesure l'interpolation.
+- **Leave-Drug-Out (LDO) :** drogues de val jamais vues à l'entraînement → mesure la généralisation structurelle (**métrique honnête**).
+- **Leave-Cell-Out (LCO) :** lignées de val jamais vues → mesure la généralisation omique.
 
 ---
 
-## Bloc 1 — Performances prédictives (Figures 02–05)
+## Phase 1 — Entraînement, prédiction et génération moléculaire
+### Figures 01 · 02 · 03 · 04 · 05 · nb_01–08
+### *24 mai 2026 — commits `4f15675`, `fca2b05`*
+
+Cette phase établit les performances de base du modèle prédicteur et des deux générateurs
+moléculaires. Elle produit les courbes d'entraînement, les résultats de comparaison avec les
+baselines classiques, et les premières visualisations des molécules générées.
+
+---
+
+### Figure 01 — Structures 2D des candidats GraphGA
+**`figures/01_molecular_structures.png`** | Généré par : `notebooks/evaluation.ipynb`
+
+**Ce que montre la figure :** représentations RDKit 2D des 10 meilleures molécules
+générées par l'algorithme génétique GraphGA, annotées avec leur QED et score composite.
+
+**Interprétation :** Les scaffolds couvrent des motifs benzylaminopipérazine,
+tricarbamates, acétamide-biphényle et lactames tricycliques — aucun n'est un analogue
+proche d'une drogue CCLE connue (Tanimoto max 0.261). Ces structures sont chimiquement
+plausibles et compatibles avec une synthèse de chimie médicinale courante. Le candidat
+#1 (QED = 0.872, MW = 303 Da, scaffold benzylaminopipérazine-cyclopropyl) est le plus
+attractif pour une synthèse préliminaire : complexité modérée, profil électronique
+favorable pour des interactions avec des sites de liaison polaires (kinases, HDAC).
+
+---
 
 ### Figure 02 — Courbes d'entraînement QSAR (split random)
-**`figures/02_training_curves.png`**
+**`figures/02_training_curves.png`** | Généré par : `notebooks/evaluation.ipynb`
 
-**Ce que montre la figure :** évolution de la RMSE (train et validation) et du
-coefficient de Pearson r par epoch sur le split random, 4 epochs.
+**Ce que montre la figure :** évolution de la RMSE train/validation et du coefficient
+de Pearson r par epoch sur le split random (4 epochs).
 
 | Epoch | Train RMSE | Val RMSE | Pearson r |
 |-------|-----------|----------|-----------|
@@ -52,283 +65,277 @@ coefficient de Pearson r par epoch sur le split random, 4 epochs.
 | 3 | 0.669 | 0.594 | 0.791 |
 | 4 | 0.606 | **0.588** | **0.811** |
 
-**Interprétation :** La convergence est rapide et régulière sur le split random.
-Le gradient norm diminue de moitié entre l'epoch 1 et 4 (26.2 → 9.4), signe d'une
-optimisation stable. L'atteinte de r = 0.811 en 4 epochs témoigne d'une capacité
-d'interpolation très élevée du modèle sur des drogues vues.
+**Interprétation :** Convergence rapide et régulière. Le gradient norm diminue de
+moitié entre l'epoch 1 et 4 (26.2 → 9.4), signe d'une optimisation stable. Le
+r = 0.811 en epoch 4 témoigne d'une forte capacité d'interpolation sur des drogues
+vues à l'entraînement.
 
 **Mise en garde critique :** Ce r = 0.811 est **optimiste par construction** — les
-mêmes drogues apparaissent dans le train et la validation. En split LDO (drogues de
-validation structurellement nouvelles), le même modèle descend à r = 0.316 dès
-l'epoch 2 avant de sur-apprendre. Le split random mesure donc la mémorisation,
-pas la généralisation.
+mêmes drogues apparaissent dans train et validation. En split LDO, le même modèle
+descend à r = 0.316 dès l'epoch 2 avant de sur-apprendre. La courbe illustre
+donc la mémorisation, pas la généralisation.
 
 ---
 
 ### Figure 03 — Reward BRICS-DQN sur 5 000 épisodes
-**`figures/03_dqn_reward.png`**
+**`figures/03_dqn_reward.png`** | Généré par : `notebooks/evaluation.ipynb`
 
-**Ce que montre la figure :** évolution de la récompense de l'agent DQN au fil des
-épisodes, avec les movennes par blocs de 100 épisodes.
+**Ce que montre la figure :** évolution de la récompense de l'agent DQN, avec les
+moyennes par blocs de 100 épisodes et le taux de validité chimique.
 
 **Interprétation :** L'agent apprend progressivement à assembler des fragments BRICS
-(sous-structures chimiques rétrosynthétiquement accessibles) pour maximiser un score
-composite (QED + IC50 prédit + pénalités de valence). La progression du reward indique
-un apprentissage effectif. La dispersion élevée reflète la nature stochastique de
-l'assemblage par fragments — la même séquence de fragments peut produire des molécules
-de qualité variable selon l'ordre d'assemblage.
-
-**Limite :** Une récompense élevée ne garantit pas la validité chimique. Le taux de
-validité (~60%) indique qu'environ 2 000 sur 5 000 molécules générées sont invalides
-(valence incorrecte, cycles aromatiques mal formés). L'introduction de contraintes de
-valence dans la fonction de récompense est la prochaine amélioration prévue.
+(sous-structures rétrosynthétiquement accessibles) pour maximiser un score composite
+(QED + IC50 prédit + pénalités de valence). La progression du reward confirme un
+apprentissage effectif. La dispersion élevée reflète la stochasticité de l'assemblage
+par fragments. Le taux de validité chimique (~60 %) indique qu'une molécule sur deux
+est invalide (valence incorrecte, aromaticité mal formée) — l'introduction d'une
+pénalité de valence dans la fonction de récompense est la prochaine amélioration.
 
 ---
 
 ### Figure 04 — Distribution QED et propriétés Lipinski (GraphGA top-10)
-**`figures/04_qed_lipinski.png`**
+**`figures/04_qed_lipinski.png`** | Généré par : `notebooks/evaluation.ipynb`
 
-**Ce que montre la figure :** pour les 10 candidats GraphGA, distribution du QED
-(Quantitative Estimate of Drug-likeness), du poids moléculaire (MW) et du logP.
+**Ce que montre la figure :** QED, poids moléculaire (MW) et logP des 10 candidats
+GraphGA, comparés aux limites de la règle de Lipinski.
 
-**Résultats :**
-- QED moyen : **0.833** (0.710 – 0.926) — excellent pour une molécule générée
-- MW moyen : **304 Da** (269 – 337) — bien dans la fenêtre Lipinski (< 500 Da)
-- LogP moyen : **1.87** (0.65 – 3.33) — favorable pour la perméabilité membranaire
+**Résultats :** QED moyen 0.833 (0.710–0.926), MW moyen 304 Da, logP moyen 1.87.
+Tous les candidats respectent la règle de Ro5.
 
-**Interprétation :** Les 10 candidats ont des propriétés physicochimiques comparables
-à des médicaments de petite molécule en phase clinique précoce. Un QED > 0.7 est
-généralement considéré comme "drug-like" dans la littérature médicinale computationnelle
-(Bickerton et al., *Nature Chemistry* 2012). Aucun candidat ne viole les règles
-de Lipinski, ce qui est un prérequis pour l'administration orale.
+**Interprétation :** Un QED > 0.7 est généralement considéré "drug-like" (Bickerton
+et al., *Nature Chemistry* 2012). Ces propriétés sont comparables à celles de
+petites molécules en phase clinique précoce. Le faible logP moyen (1.87) est
+favorable pour la solubilité aqueuse et la perméabilité membranaire, réduisant
+le risque d'échec ADMET précoce.
 
 ---
 
 ### Figure 05 — Dashboard synthétique
-**`figures/05_dashboard.png`**
+**`figures/05_dashboard.png`** | Généré par : `notebooks/evaluation.ipynb`
 
-**Ce que montre la figure :** tableau de bord résumant en un seul panneau les
-métriques clés : courbes d'entraînement, comparaison baselines, reward DQN, QED,
-pré-entraînement ChEMBL.
+**Ce que montre la figure :** tableau de bord résumant en un panneau unique les
+métriques clés — courbes d'entraînement, comparaison baselines, reward DQN,
+distribution QED, pré-entraînement ChEMBL.
 
-**Interprétation :** Ce dashboard est conçu pour une lecture rapide par un encadrant
-ou un lecteur externe. Il met en évidence les deux tensions centrales du projet :
-(1) le modèle Bi-Int performe bien en random (r = 0.811) mais mal en LDO (r = 0.316) ;
-(2) les molécules générées ont de bonnes propriétés drug-like (QED > 0.7) mais leurs
-IC50 prédites sont hors distribution. Les deux informations doivent être lues ensemble
-pour former un jugement juste sur l'état du projet.
+**Interprétation :** Ce dashboard met en évidence les deux tensions centrales du
+projet : (1) le modèle Bi-Int interpole bien (r = 0.811 random) mais généralise
+mal (r = 0.316 LDO) ; (2) les molécules générées ont de bonnes propriétés
+drug-like mais leurs IC50 prédites sont hors distribution. Les deux informations
+doivent être lues ensemble pour former un jugement équilibré.
 
 ---
 
-## Bloc 2 — Génération et validation moléculaire (Figures 01, 06, 07, 08)
+### Figures notebook (nb\_01–08)
+**`figures/nb_01_ccle_summary.png`** à **`figures/nb_08_dashboard.png`**
+Généré par : `notebooks/evaluation.ipynb`
 
-### Figure 01 — Structures 2D des candidats GraphGA
-**`figures/01_molecular_structures.png`**
+Versions haute résolution et détaillées des analyses principales :
+résumé CCLE (couverture SMILES, dimensions omiques, distribution splits), courbes
+de pré-entraînement ChEMBL (val RMSE = 0.2187 à epoch 9), analyse QSAR par split,
+comparaison des 5 modèles × 3 splits, reward DQN avec taux de validité par bloc.
+Ces figures servent à la documentation technique et à la reproduction des résultats
+sans relancer l'entraînement (valeurs de fallback dans le notebook).
 
-**Ce que montre la figure :** représentations RDKit 2D des 10 meilleures molécules
-générées par l'algorithme génétique GraphGA, annotées avec leur QED et leur score
-composite.
+---
 
-**Interprétation :** L'inspection visuelle des structures confirme la diversité
-des scaffolds : motifs benzylaminopipérazine, tricarbamates, acétamides biphényle.
-Ces structures ne sont pas des analogues proches de drogues anticancéreuses connues,
-ce qui les positionne comme des hits potentiels pour des cibles non encore couvertes
-dans l'espace CCLE. La présence systématique de groupes amino et carbonyle est
-cohérente avec un ciblage de sites de liaison polaires (kinases, HDAC, récepteurs
-nucléaires).
+## Phase 2 — Validation chimique rigoureuse et ablation LDO
+### Figures 06 · 07 · 08
+### *25 mai & 31 mai 2026 — commits `94a2513`, `0a4a37e`, `3b1d054`*
 
-**Note :** Le candidat #1 (QED = 0.872, scaffold benzylaminopipérazine-cyclopropyl)
-est le plus attractif pour une synthèse préliminaire en raison de sa complexité
-modérée et de son profil électronique favorable.
+Cette phase répond aux demandes de l'encadrant : valider rigoureusement les
+candidats générés avec des métriques chimiques standardisées (PAINS, Brenk,
+SA score, diversité interne) et analyser les leviers d'amélioration LDO.
 
 ---
 
 ### Figure 06 — Distribution Tanimoto des candidats vs drogues CCLE
-**`figures/06_tanimoto_distribution.png`**
+**`figures/06_tanimoto_distribution.png`** | Généré par : `scripts/tanimoto_analysis.py`
 
-**Ce que montre la figure :** pour chaque candidat généré (GraphGA top-10), le
-Tanimoto maximum calculé avec les 184 drogues CCLE ayant un SMILES valide (Morgan
-FP, rayon = 2, 2048 bits). Histogramme de distribution.
+**Ce que montre la figure :** pour chaque candidat GraphGA (top-10), le Tanimoto
+maximum calculé avec les 184 drogues CCLE ayant un SMILES valide (Morgan FP, rayon 2,
+2048 bits). Histogramme de distribution.
 
-**Résultats :**
-- Tanimoto max médian : ~0.22
-- Aucun candidat au-dessus de 0.30
-- Candidat le plus proche d'une drogue CCLE : #1 (Tanimoto = 0.261 vs UNC1215)
+**Résultats :** Tanimoto max médian ~0.22. Aucun candidat au-dessus de 0.30.
+Drogue CCLE la plus proche : UNC1215 (Tanimoto = 0.261 vs candidat #1).
 
-**Interprétation :** Une similarité Tanimoto < 0.30 définit des composés
-"structurellement nouveaux" selon les conventions de la chimie médicinale
-computationnelle (Willett, 2011). Cette originalité structurelle présente deux
-faces : elle maximise le potentiel de brevet et la couverture de l'espace chimique,
-mais elle place les candidats dans une zone où le modèle Bi-Int extrapole
-(voir Figure 13 — domaine d'applicabilité). Les IC50 prédites pour ces candidats
-doivent donc être traitées comme des indicateurs ordinaux (classement relatif), non
-comme des valeurs absolues fiables.
+**Interprétation :** Un Tanimoto < 0.30 définit des composés "structurellement
+nouveaux" selon les conventions médicinales computationnelles (Willett, 2011). Cette
+originalité est à double tranchant : elle maximise le potentiel de brevet mais place
+les candidats dans une zone où le modèle Bi-Int extrapole (voir Figure 13). Les IC50
+prédites pour ces candidats sont des indicateurs ordinaux (classement relatif), non
+des valeurs absolues fiables.
 
 ---
 
-### Figure 07 — Ablation LDO : Bi-Int vs baselines
-**`figures/07_ldo_ablation.png`**
+### Figure 07 — Ablation LDO : configurations Bi-Int vs baselines
+**`figures/07_ldo_ablation.png`** | Généré par : `scripts/ldo_ablation.py`
 
-**Ce que montre la figure :** comparaison des performances LDO (Pearson r) du
-modèle Bi-Int face aux baselines classiques (XGBoost, RF, Ridge, MLP) et entre
-différentes configurations du modèle (baseline, +early stopping, +régularisation,
-+GNN freeze, +40k triplets).
+**Ce que montre la figure :** comparaison Pearson r LDO entre le Bi-Int en
+configuration baseline et les modèles de référence. Note : les 4 configurations
+améliorées (early stopping, régularisation, GNN freeze, 40k triplets) ont échoué
+lors de l'exécution suite à la réorganisation `src/`.
 
-**Résultats clés (valeurs réelles disponibles) :**
+**Résultats disponibles :**
 
-| Modèle | LDO r | LDO RMSE |
-|--------|-------|----------|
+| Configuration | LDO r | LDO RMSE |
+|--------------|-------|---------|
 | Bi-Int baseline (epoch 1) | 0.535 | 0.843 |
+| Bi-Int (epoch 2, best run) | **0.316** | 0.983 |
 | XGBoost (cible) | 0.367 | 0.938 |
-| Bi-Int epoch 2 (best run) | **0.316** | 0.983 |
 
-**Interprétation :** La configuration ablation n'a retourné de résultats que pour la
-configuration baseline (les autres configurations ont échoué lors de la réorganisation
-`src/`). Le r = 0.535 à l'epoch 1 représente un point de départ avant overfitting. La
-comparaison avec XGBoost (r = 0.367) confirme que le deep learning n'apporte pas encore
-de gain en généralisation LDO à cette échelle de données. Ce résultat, loin d'être
-décourageant, pointe vers les leviers d'amélioration prioritaires : early stopping
-rigoureux, régularisation, augmentation du dataset.
+**Interprétation :** Le r = 0.535 à l'epoch 1 représente la performance avant
+overfitting — le modèle sur-apprend dès l'epoch 2. XGBoost (r = 0.367) reste
+supérieur au meilleur checkpoint LDO Bi-Int (r = 0.316), confirmant que la
+complexité du modèle profond n'est pas encore justifiée par le volume de données
+(16k triplets d'entraînement). Ce constat oriente les efforts vers la régularisation,
+l'augmentation de données et un early stopping rigoureux plutôt que vers une
+complexification de l'architecture.
 
 ---
 
 ### Figure 08 — Heatmap de diversité interne (60 candidats)
-**`figures/08_internal_diversity.png`**
+**`figures/08_internal_diversity.png`** | Généré par : `scripts/molecular_validation.py`
 
-**Ce que montre la figure :** matrice symétrique de similarité Tanimoto entre les
-60 candidats (10 GraphGA + 50 BRICS-DQN top-reward). Plus la couleur est chaude,
-plus deux molécules sont similaires.
+**Ce que montre la figure :** matrice symétrique 60×60 de similarité Tanimoto entre
+tous les candidats générés (10 GraphGA + 50 BRICS-DQN top-reward). Couleurs chaudes
+= similaires, froides = distincts.
 
-**Résultats :**
-- Tanimoto moyen intra-bibliothèque : **0.10**
-- Diversité (1 − Tanimoto moyen) : **0.90**
+**Résultats :** Tanimoto moyen intra-bibliothèque = **0.10** → diversité = **0.90**.
+Aucun cluster visible dans la heatmap.
 
-**Interprétation :** Une diversité de 0.90 sur 60 composés est exceptionnelle — à
-titre de comparaison, une chimiothèque combinatoire autour d'un seul scaffold donne
-typiquement 0.4–0.6. L'absence de clusters visibles dans la heatmap confirme que
-GraphGA et BRICS-DQN explorent des régions complémentaires de l'espace chimique.
-Ce résultat est un argument fort pour présenter un sous-ensemble de 10–15 composés
-à un chimiste médicinal : la bibliothèque est représentative d'une large diversité
-structurelle et maximise les chances de trouver un hit actif sur une cible donnée.
+**Interprétation :** Une diversité de 0.90 sur 60 composés est exceptionnelle — une
+chimiothèque combinatoire classique autour d'un seul scaffold donne typiquement
+0.4–0.6. L'absence de clusters confirme que GraphGA et BRICS-DQN explorent des
+régions complémentaires de l'espace chimique. Cette diversité est un argument fort
+pour présenter un sous-ensemble de 10–15 composés à un chimiste médicinal : la
+bibliothèque maximise la couverture pharmacologique et réduit la redondance en cas
+de screening expérimental.
+
+**Contexte MedChem global :** 38/60 candidats passent tous les filtres (PAINS, Brenk,
+Lipinski, Veber). Les alertes Brenk les plus fréquentes sont les amines aromatiques
+(risque métabolique CYP450) et les chaînes aliphatiques longues (solubilité). Ces
+alertes sont des heuristiques, non des verdicts — certains médicaments approuvés
+contiennent des groupes Brenk.
 
 ---
 
-## Bloc 3 — Interprétabilité et fiabilité (Figures 09–13)
+## Phase 3 — Interprétabilité et fiabilité du modèle
+### Figures 09 · 10 · 11 · 12 · 13
+### *1er juin 2026 — commit `d38ca9e`*
 
-> Ces analyses ont été réalisées sur le checkpoint LDO (r = 0.210, epoch 1).
-> **La faible performance de ce modèle implique que les attributions reflètent ce
-> que ce modèle particulier a appris, pas nécessairement la biologie réelle.**
-> Les biomarqueurs seront recalculés sur le checkpoint random (r = 0.811) pour
-> comparaison et validation.
+Cette phase produit les premières analyses d'interprétabilité (biomarqueurs
+génomiques par attribution Gradient × Input) et les alertes de fiabilité (domaine
+d'applicabilité Tanimoto, incertitude MC Dropout). Toutes calculées sur le checkpoint
+LDO (r = 0.210, epoch 1).
+
+> ⚠️ **Limite importante :** les attributions sont calculées sur un modèle à
+> r = 0.210. Un modèle insuffisamment convergé peut apprendre des corrélations
+> artéfactuelles. Ces résultats seront recalculés sur le checkpoint random
+> (r = 0.811) pour comparaison et validation biologique.
+
+---
 
 ### Figure 09 — Importance des transcrits non-codants (ncRNA)
-**`figures/09_ncrna_importance.png`**
+**`figures/09_ncrna_importance.png`** | Généré par : `scripts/ncrna_biomarker_analysis.py`
 
 **Méthode :** Gradient × Input sur le vecteur GEx (978 dimensions). Pour chaque
-paire de validation (drogue *d*, lignée *c*), on calcule le gradient de la prédiction
-IC50 par rapport aux 978 features d'expression génique, puis on multiplie par la
-valeur d'entrée (Gradient × Input = attribution locale). L'importance d'un gène est
-la moyenne des valeurs absolues sur 150 paires échantillonnées aléatoirement dans
-le split de validation LDO. On restreint ensuite aux 76 transcrits non-codants
-identifiés parmi les 978 features (patterns RP11-, AC-, AL-, LINC-, MIR-, RNU-,
-SNORD-, SNHG-, ainsi que les ncRNA nommés connus : H19, GAS5, RMRP, SNHG5).
+paire de validation (drogue *d*, lignée *c*), le gradient de la prédiction IC50 par
+rapport aux 978 features d'expression est multiplié par la valeur d'entrée.
+L'importance d'un gène est la moyenne des valeurs absolues sur **150 paires**
+échantillonnées dans le split de validation LDO. Restreint aux 76 transcrits
+non-codants identifiés parmi les 978 features (RP11-, AC-, AL-, LINC-, MIR-, RNU-,
+SNORD-, SNHG-, ainsi que les ncRNA nommés : H19, GAS5, RMRP, SNHG5, VIM-AS1…).
 
 **Résultats :**
 
 | Rang/76 | Gène | Rang/978 | Importance | Catégorie biologique |
 |---------|------|----------|------------|----------------------|
 | 1 | RNU1-28P | 34 | 0.001350 | Pseudogène snRNA U1 |
-| 2 | RMRP | 57 | 0.001221 | ARN composant de la RNase MRP mitochondriale |
-| 3–20 | RP11-*, AC*, Z*, VIM-AS1 | 69–271 | — | Loci génomiques non-annotés |
+| 2 | RMRP | 57 | 0.001221 | ARN composant RNase MRP mitochondriale |
+| 8 | VIM-AS1 | 166 | 0.001017 | Antisens de Vimentine (EMT) |
 | 54 | SNHG5 | 715 | 0.000431 | Hôte snoRNA — oncogène (prolifération) |
 | **61** | **H19** | **769** | **0.000323** | **lncRNA oncogène — résistance chimio** |
 | **70** | **GAS5** | **916** | **0.000090** | **lncRNA suppresseur de tumeur** |
 
 **Interprétation :** Le modèle pondère prioritairement des loci génomiques de
-nomenclature RP11- (loci chromosomiques non-annotés dans les bases fonctionnelles
-actuelles) et des pseudogènes snRNA (RNU1-28P). Ces transcrits ont une variance
-d'expression élevée entre lignées cellulaires (raison de leur sélection dans le
-top-978), mais leur rôle fonctionnel est non documenté. H19 et GAS5 — les deux
-lncRNA à rôle oncologique bien établi — se trouvent en bas du classement (rangs
-61 et 70 sur 76).
+nomenclature RP11- et des pseudogènes snRNA — transcrits à haute variance
+d'expression entre lignées mais sans rôle fonctionnel documenté. H19 et GAS5,
+les deux lncRNA à rôle oncologique établi, se trouvent en bas du classement
+(rangs 61 et 70/76). Ce résultat est cohérent avec une convergence partielle
+(r = 0.210) : le modèle exploite des corrélations statistiques de variance élevée
+plutôt que des mécanismes biologiques de pharmacorésistance.
 
-Ce résultat est **biologiquement cohérent avec la convergence partielle du modèle
-(r = 0.210 en LDO)** : un modèle sous-optimal peut apprendre à exploiter des
-corrélations artéfactuelles (variance cellulaire non liée à la pharmacorésistance)
-plutôt que les mécanismes biologiques sous-jacents. La prochaine étape est de
-recalculer ces attributions sur le checkpoint random (r = 0.811), où le modèle a
-appris une représentation plus riche. Si H19 et GAS5 remontent dans le classement
-avec le meilleur modèle, cela constituera une validation biologique de l'apprentissage.
+**VIM-AS1** (rang 8) mérite une attention particulière : transcrit antisens de
+VIM (Vimentine), protéine surexprimée dans la transition épithélio-mésenchymateuse
+(EMT). Son importance relative pourrait refléter un signal biologique réel lié à
+la plasticité phénotypique des lignées cellulaires.
 
-**VIM-AS1** (rang 8) mérite une attention particulière : c'est le transcrit antisens
-de VIM (Vimentine), une protéine du cytosquelette surexprimée dans la transition
-épithélio-mésenchymateuse (EMT). Son importance relative dans ce classement pourrait
-refléter un signal biologique réel lié à la plasticité phénotypique des lignées.
+**Prochaine étape :** recalculer sur le checkpoint random (r = 0.811). Si H19 et
+GAS5 remontent dans le classement avec le modèle convergé, cela constituera une
+validation biologique de l'apprentissage.
 
 ---
 
 ### Figure 10 — Heatmap importance ncRNA × drogues
-**`figures/10_ncrna_vs_drugs.png`**
+**`figures/10_ncrna_vs_drugs.png`** | Généré par : `scripts/ncrna_biomarker_analysis.py`
 
-**Ce que montre la figure :** matrice (top-15 drogues) × (top-10 ncRNA) où chaque
-cellule représente l'importance normalisée par colonne. Une couleur chaude indique
-que ce ncRNA a une importance relative élevée pour cette drogue particulière.
+**Ce que montre la figure :** matrice (top-15 drogues × top-10 ncRNA), valeurs
+normalisées par colonne. Couleur chaude = importance relative élevée de ce ncRNA
+pour cette drogue.
 
-**Interprétation :** Cette figure permet de détecter une éventuelle **spécificité
-drug-ncRNA** : certaines drogues activent-elles préférentiellement certains ncRNA ?
-Une heatmap uniforme (toutes les lignes similaires) indiquerait que le modèle ne
-discrimine pas le profil ncRNA selon la drogue — cohérent avec un modèle peu
-convergé. Une heatmap différenciée (blocs de couleur distinctifs) suggérerait une
-spécificité apprise. Cette analyse sera plus informative après recalcul sur le
-checkpoint random.
+**Interprétation :** Cette figure permet de détecter une **spécificité drug-ncRNA** :
+certaines drogues activent-elles préférentiellement certains ncRNA dans la prédiction
+du modèle ? Une heatmap uniforme (lignes similaires entre elles) indique que le
+modèle ne discrimine pas les profils ncRNA selon la drogue — attendu pour un modèle
+peu convergé. Une heatmap différenciée (blocs de couleur) suggérerait une
+spécificité drug-ncRNA apprise. Cette analyse sera plus informative après recalcul
+sur le checkpoint random, où le modèle a appris des représentations plus
+discriminantes.
 
 ---
 
 ### Figure 11 — Importance des gènes codants (top-20)
-**`figures/11_coding_biomarkers.png`**
+**`figures/11_coding_biomarkers.png`** | Généré par : `scripts/coding_biomarker_analysis.py`
 
-**Méthode :** même approche Gradient × Input que Figure 09, restreinte aux 902 gènes
-codants (978 − 76 ncRNA). Les biomarqueurs oncologiques connus sont surlignés en
-rouge.
+**Méthode :** même Gradient × Input que Figure 09, restreint aux 902 gènes codants
+(978 − 76 ncRNA). Biomarqueurs oncologiques canoniques surlignés en rouge
+(EGFR, KRAS, BRAF, TP53, PIK3CA, ERBB2, ABL1, MYC, BCL2, PTEN…).
 
 **Résultats :**
 
-| Rang | Gène | Importance | Biomarqueur connu | Note biologique |
-|------|------|------------|-------------------|-----------------|
-| 1 | CCND3 | 0.001902 | Non | Cycline D3 — contrôle G1/S, prolifération |
-| 4 | CTGF | 0.001826 | Non | CCN2 — fibrose, EMT, résistance aux thérapies ciblées |
-| 5 | THY1 | 0.001783 | Non | CD90 — marqueur cellules souches tumorales |
-| 8 | SQSTM1 | 0.001660 | Non | p62 — autophagie, résistance au stress oxydatif |
-| 13 | AREG | 0.001551 | Non | Amphiréguline — ligand EGFR, résistance anti-EGFR |
-| 18 | APP | 0.001498 | Non | Précurseur APP — signalisation Notch |
-| 24 | CTNNB1 | 0.001411 | Non | β-caténine — voie Wnt, résistance aux taxanes |
+| Rang | Gène | Importance | Pertinence oncologique |
+|------|------|------------|------------------------|
+| 1 | CCND3 | 0.001902 | Cycline D3 — contrôle G1/S, prolifération |
+| 4 | CTGF | 0.001826 | CCN2 — EMT, résistance thérapies ciblées |
+| 5 | THY1 | 0.001783 | CD90 — marqueur cellules souches tumorales |
+| 8 | SQSTM1 | 0.001660 | p62 — autophagie, résistance au stress oxydatif |
+| 13 | AREG | 0.001551 | Amphiréguline — ligand EGFR, résistance anti-EGFR |
+| 24 | CTNNB1 | 0.001411 | β-caténine — voie Wnt, résistance aux taxanes |
 
-**Biomarqueurs oncologiques canoniques (EGFR, KRAS, TP53, BRAF…) dans top-20 : 0/20.**
+**Biomarqueurs oncologiques canoniques dans le top-20 : 0/20.**
 
-**Interprétation :** L'absence de marqueurs oncologiques classiques dans le top-20
-est le résultat le plus instructif de cette analyse. Un modèle ayant appris la
+**Interprétation :** L'absence d'EGFR, KRAS, BRAF, TP53 dans le top-20 est le
+signal le plus clair d'une convergence insuffisante. Un modèle ayant appris la
 pharmacorésistance devrait pondérer EGFR pour les inhibiteurs d'EGFR (Afatinib,
 Erlotinib), BRAF pour les inhibiteurs BRAF (PLX-4720), ABL1 pour les inhibiteurs
-BCR-ABL. Leur absence confirme que le checkpoint LDO (r = 0.210) n'a pas appris
-les voies de signalisation pharmacologiquement pertinentes.
+BCR-ABL. Leur absence confirme que le checkpoint LDO n'a pas appris les voies de
+signalisation pharmacologiquement pertinentes.
 
-Cela dit, plusieurs gènes du top-20 ont une pertinence biologique indirecte :
-CTGF est impliqué dans la résistance aux thérapies ciblées via le microenvironnement
-tumoral ; AREG est un mécanisme de résistance aux cetuximab/erlotinib bien documenté ;
-CTNNB1 est associé à la résistance aux taxanes dans le cancer du sein. Ces
-cooccurrences ne sont pas aléatoires et suggèrent que le modèle capte partiellement
-des signaux biologiques, sans avoir encore convergé vers les mécanismes clés.
+Cependant, plusieurs gènes ont une pertinence indirecte non négligeable : AREG est
+un mécanisme de résistance au cetuximab/erlotinib documenté ; CTNNB1 est associé
+à la résistance aux taxanes dans le cancer du sein ; SQSTM1 est impliqué dans
+l'autophagie comme mécanisme de résistance à la chimiothérapie. Ces cooccurrences
+suggèrent que le modèle capte partiellement des signaux biologiques, sans avoir
+encore convergé vers les mécanismes clés.
 
 ---
 
 ### Figure 12 — Incertitude MC Dropout
-**`figures/12_uncertainty_distribution.png`**
+**`figures/12_uncertainty_distribution.png`** | Généré par : `scripts/uncertainty_mc_dropout.py`
 
-**Méthode :** pour 200 paires de validation (drogue, lignée) tirées aléatoirement,
-N = 30 passages forward sont effectués avec `training=True` (dropout actif, taux
-10 %). On calcule l'écart-type σ des 30 prédictions et l'intervalle de confiance
-à 95 % (percentiles 2.5 et 97.5). Le seuil d'alerte est fixé à
-médiane(σ) + écart-type(σ) des 200 paires.
+**Méthode :** 200 paires de validation, N = 30 passages forward avec `training=True`
+(dropout = 10 % actif). Calcul de σ (écart-type), IC 95 % (percentiles 2.5–97.5)
+par paire. Seuil d'alerte = médiane(σ) + écart-type(σ) sur les 200 paires.
 
 **Résultats :**
 
@@ -336,109 +343,91 @@ médiane(σ) + écart-type(σ) des 200 paires.
 |----------|--------|
 | σ médian | ~0.13 |
 | Seuil d'alerte | **0.1975** |
-| Paires HIGH_UNCERTAINTY (σ > seuil) | **11 / 200 (5.5 %)** |
-| Paires OK | 189 / 200 (94.5 %) |
-| IC 95% moyen (amplitude) | ~0.68 unités z-score |
+| HIGH_UNCERTAINTY (σ > seuil) | **11 / 200 (5.5 %)** |
+| IC 95 % moyen (amplitude) | ~0.68 unités z-score |
 
-**Interprétation :** Un taux de 5.5 % de paires à haute incertitude est
-**anormalement bas** pour un modèle à r = 0.210. Ce résultat illustre un phénomène
-bien documenté en apprentissage profond : les réseaux de neurones sont
-**calibrated pour être confiants**, même quand leurs prédictions sont fausses.
-Le modèle produit des intervalles étroits (~0.68 σ) y compris sur des prédictions
-incorrectes.
+**Interprétation :** Un taux de 5.5 % de paires à haute incertitude est anormalement
+bas pour un modèle à r = 0.210. Ce phénomène — un réseau confiant malgré de mauvaises
+prédictions — est bien documenté (Gal & Ghahramani, 2016) : les réseaux de neurones
+sont calibrés pour produire des sorties stables, y compris lors d'extrapolations hors
+distribution. Le dropout à 10 % est insuffisant pour une estimation bayésienne robuste
+(recommandation : 20–50 %).
 
-Deux mécanismes expliquent cette sous-estimation de l'incertitude : (1) le taux de
-dropout de 10 % est insuffisant pour une estimation bayésienne robuste (Gal & Ghahramani,
-2016 recommandent 20–50 % pour MC Dropout) ; (2) le modèle a convergé vers un
-minimum local stable où les sous-réseaux activés par dropout donnent des prédictions
-similaires. 
+**Exemple concret :** la paire (NG-25, BT483\_BREAST) présente ic50\_true = 6.07
+vs ic50\_mean = 1.94 — erreur de ~4 unités z-score — avec σ = 0.205 (alerte
+HIGH\_UNCERTAINTY). Ce cas illustre que l'alerte MC Dropout est utile mais tardive
+sur des prédictions profondément incorrectes.
 
-**Implication pratique :** l'incertitude MC Dropout seule ne suffit pas comme alerte
-de fiabilité pour ce modèle. Elle doit être **combinée obligatoirement** avec
-l'alerte Tanimoto (Figure 13) : un modèle peut être très confiant (σ faible) et
-simultanément opérer hors de son domaine d'applicabilité (Tanimoto < 0.4). Les deux
-métriques sont complémentaires et non substituables.
-
-**Exemple emblématique dans les données :** la paire (NG-25, BT483_BREAST) a
-ic50_true = 6.07 (log µM) mais ic50_mean = 1.94 — une erreur de ~4 unités z-score —
-avec une alerte HIGH_UNCERTAINTY (σ = 0.205). Ce cas illustre que l'alerte MC Dropout
-est utile mais tarde à se déclencher sur des prédictions profondément incorrectes.
+**Implication pratique :** MC Dropout seul est insuffisant comme alerte de fiabilité.
+Il doit être **combiné obligatoirement avec l'alerte Tanimoto** (Figure 13) : un
+modèle peut être confiant (σ faible) et simultanément opérer hors de son domaine
+d'applicabilité. Les deux métriques sont complémentaires et non substituables.
 
 ---
 
 ### Figure 13 — Domaine d'applicabilité (Tanimoto)
-**`figures/13_applicability_domain.png`**
+**`figures/13_applicability_domain.png`** | Généré par : `scripts/applicability_domain.py`
 
-**Méthode :** pour chaque drogue du dataset CCLE (train et validation), on calcule
-la similarité Tanimoto maximale avec toutes les drogues d'entraînement (Morgan FP,
-rayon 2, 2048 bits). Seuils : ≥ 0.6 = fiable, [0.4 – 0.6] = prudence, < 0.4 =
-hors domaine. En split LDO, 161 drogues constituent le set d'entraînement et 40 le
-set de validation.
+**Méthode :** pour chaque drogue de validation LDO (40 drogues), calcul du Tanimoto
+maximum avec les 161 drogues d'entraînement (Morgan FP, rayon 2, 2048 bits).
+Seuils : ≥ 0.6 = fiable, [0.4–0.6] = prudence, < 0.4 = hors domaine.
 
 **Résultats sur les 40 drogues de validation :**
 
-| Niveau | Seuil Tanimoto | N drogues | % | Interprétation |
-|--------|---------------|-----------|---|----------------|
-| 🟢 RELIABLE | ≥ 0.6 | **4** | **10 %** | Analogue structurel d'une drogue d'entraînement |
-| 🟡 CAUTION | 0.4 – 0.6 | **4** | **10 %** | Proximité partielle — prédiction à vérifier |
+| Niveau | Seuil | N | % | Signification |
+|--------|-------|---|---|---------------|
+| 🟢 RELIABLE | ≥ 0.6 | 4 | **10 %** | Analogue structurel d'une drogue d'entraînement |
+| 🟡 CAUTION | 0.4–0.6 | 4 | **10 %** | Proximité partielle — résultat à vérifier |
 | 🔴 UNRELIABLE | < 0.4 | **32** | **80 %** | Drogue structurellement nouvelle — hors domaine |
 
-**Drogues fiables (Tanimoto = 1.0) :** GSK269962A, JQ1, Refametinib — tous des
-paires de variants (isoformes stéréochimiques ou formes prodrogue) d'une même molécule
-présente dans le train.
+Les 4 drogues RELIABLE (Tanimoto = 1.0) sont des variants stéréochimiques ou
+formes prodrogue d'une même molécule présente dans le train (GSK269962A, JQ1,
+Refametinib). Ce sont les prédictions les plus fiables sur ce split.
 
-**Interprétation :** Ce résultat est **attendu par définition du split LDO** : les
-drogues de validation sont sélectionnées pour ne pas se chevaucher avec celles
-d'entraînement. Le Tanimoto < 0.4 pour 80 % d'entre elles confirme qu'elles occupent
-des régions distinctes de l'espace chimique. Ce résultat ne diagnostique pas un
-problème — il le **quantifie**.
+**Interprétation :** Ce résultat est attendu par définition du split LDO. Son
+intérêt n'est pas de diagnostiquer un problème mais de le **quantifier précisément**.
+Le modèle doit prédire l'IC50 de molécules dont le scaffold est inédit dans 80 %
+des cas — ce qui explique mécaniquement le r = 0.316.
 
-**Utilisation pratique immédiate :** cette alerte Tanimoto est utilisable en production
-dès maintenant, indépendamment de toute amélioration du modèle prédictif. Pour toute
-nouvelle drogue soumise au modèle :
-
+**Utilisation en production — immédiatement opérationnelle :**
 ```
-si max_tanimoto(drogue_nouvelle, drogues_train) < 0.4 → afficher 🔴 HORS DOMAINE
-si 0.4 ≤ max_tanimoto < 0.6                            → afficher 🟡 PRUDENCE
-si max_tanimoto ≥ 0.6                                  → afficher 🟢 FIABLE
+si max_tanimoto(drogue, drogues_train) < 0.4  →  🔴 HORS DOMAINE — prédiction non fiable
+si 0.4 ≤ max_tanimoto < 0.6                   →  🟡 PRUDENCE — interpréter avec réserve
+si max_tanimoto ≥ 0.6                          →  🟢 FIABLE — prédiction dans le domaine appris
 ```
 
-C'est la mesure de fiabilité la plus robuste du projet, car elle ne dépend pas de
-la performance du modèle mais de la distance chimique entre la drogue cible et
-l'espace d'entraînement.
+Cette alerte est **robuste indépendamment de la performance du modèle** — elle
+repose sur la distance chimique, pas sur la précision des prédictions. C'est la
+mesure de fiabilité la plus immédiatement exploitable du projet.
 
 ---
 
-## Synthèse globale — Ce que les 13 figures racontent ensemble
+## Synthèse par phase
 
-| Groupe | Message central | Figures |
-|--------|----------------|---------|
-| Performances | Le modèle interpole bien (r=0.811) mais généralise mal (r=0.316 LDO) | 02, 05, 07 |
-| Génération | 38/60 candidats passent tous les filtres MedChem ; diversité = 0.90 | 01, 04, 08 |
-| Originalité | Tous les candidats sont structurellement nouveaux vs CCLE (Tanimoto < 0.30) | 06 |
-| Interprétabilité | Le checkpoint LDO (r=0.210) ne capture pas les biomarqueurs canoniques | 09, 10, 11 |
-| Incertitude | Le modèle est trop confiant ; MC Dropout insuffisant seul | 12 |
-| Fiabilité | 80 % des nouvelles drogues sont hors domaine — alerte Tanimoto opérationnelle | 13 |
+| Phase | Figures | Période | Message central |
+|-------|---------|---------|----------------|
+| **1 — Entraînement & génération** | 01–05, nb\_01–08 | 24 mai 2026 | r=0.811 (random) vs r=0.316 (LDO) ; 38/60 candidats MedChem-clean ; diversité 0.90 |
+| **2 — Validation chimique & ablation** | 06, 07, 08 | 25–31 mai 2026 | Candidats structurellement nouveaux (Tanimoto < 0.30) ; XGBoost > Bi-Int en LDO ; bibliothèque très diverse |
+| **3 — Interprétabilité & fiabilité** | 09–13 | 1er juin 2026 | H19/GAS5 non prioritaires sur LDO checkpoint ; MC Dropout trop confiant ; 80 % des nouvelles drogues hors domaine |
 
-**Conclusion pour l'expert :** Le projet Twin démontre la faisabilité technique d'un
-prédicteur multimodal IC50 + générateur de novo sur données CCLE. Les performances en
-généralisation LDO (r = 0.316) restent en dessous de XGBoost (r = 0.367), ce qui
-indique que la complexité du modèle profond n'est pas encore justifiée à cette échelle
-de données. Les analyses d'interprétabilité sur le checkpoint LDO confirment cette
-limite : les biomarqueurs identifiés ne sont pas biologiquement cohérents. Les
-prochaines étapes prioritaires sont : (1) relancer les biomarqueurs sur le checkpoint
-random pour validation biologique, (2) améliorer la convergence LDO par régularisation
-et augmentation de données, (3) déployer l'alerte Tanimoto en production.
+**Lecture transversale :** les trois phases forment un argument progressif.
+La Phase 1 établit que le modèle fonctionne mais généralise mal. La Phase 2 valide
+que les molécules générées sont chimiquement solides, malgré cette limitation.
+La Phase 3 quantifie précisément *pourquoi* la généralisation est difficile (80 %
+des nouvelles drogues sont hors domaine d'applicabilité) et *comment* signaler
+cette limite à l'utilisateur final (alertes Tanimoto + MC Dropout).
 
 ---
 
 ## Références méthodologiques
 
-- **Gradient × Input :** Simonyan et al. (2014), Kindermans et al. (2016)
-- **MC Dropout comme approximation bayésienne :** Gal & Ghahramani (2016)
-- **Domaine d'applicabilité Tanimoto :** Tropsha & Golbraikh (2007)
-- **QED :** Bickerton et al., *Nature Chemistry* (2012)
-- **SA Score :** Ertl & Schuffenhauer, *J. Cheminformatics* (2009)
-- **PAINS :** Baell & Holloway, *J. Med. Chem.* (2010)
-- **Tanimoto / Morgan FP :** Rogers & Hahn, *J. Chem. Inf. Model.* (2010)
-- **Dataset CCLE :** Barretina et al., *Nature* (2012)
+| Méthode | Référence |
+|---------|-----------|
+| Gradient × Input | Simonyan et al. (2014) ; Kindermans et al. (2016) |
+| MC Dropout | Gal & Ghahramani, *ICML* 2016 |
+| Domaine d'applicabilité Tanimoto | Tropsha & Golbraikh, *J. Chem. Inf. Model.* 2007 |
+| QED | Bickerton et al., *Nature Chemistry* 2012 |
+| SA Score | Ertl & Schuffenhauer, *J. Cheminformatics* 2009 |
+| PAINS | Baell & Holloway, *J. Med. Chem.* 2010 |
+| Morgan FP / Tanimoto | Rogers & Hahn, *J. Chem. Inf. Model.* 2010 |
+| CCLE dataset | Barretina et al., *Nature* 2012 |
