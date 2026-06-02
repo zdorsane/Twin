@@ -111,21 +111,37 @@ def load_csv(path):
 
 
 def mol_image_b64(smiles):
+    """Try RDKit first, fallback to PubChem API (works without RDKit)."""
+    import base64
+    from io import BytesIO
+
+    # 1. Try RDKit (fast, local)
     try:
         from rdkit import Chem, RDLogger
         from rdkit.Chem import Draw
-        from io import BytesIO
-        import base64
         RDLogger.DisableLog("rdApp.*")
         mol = Chem.MolFromSmiles(smiles)
-        if mol is None:
-            return None
-        img = Draw.MolToImage(mol, size=(280, 200))
-        buf = BytesIO()
-        img.save(buf, format="PNG")
-        return base64.b64encode(buf.getvalue()).decode()
+        if mol is not None:
+            img = Draw.MolToImage(mol, size=(300, 220))
+            buf = BytesIO()
+            img.save(buf, format="PNG")
+            return base64.b64encode(buf.getvalue()).decode()
     except Exception:
-        return None
+        pass
+
+    # 2. Fallback: PubChem structure image via REST API
+    try:
+        import urllib.request, urllib.parse
+        smi_enc = urllib.parse.quote(smiles)
+        url = f"https://cactus.nci.nih.gov/chemical/structure/{smi_enc}/image?format=png&width=300&height=220"
+        with urllib.request.urlopen(url, timeout=6) as resp:
+            data = resp.read()
+        if data and len(data) > 100:
+            return base64.b64encode(data).decode()
+    except Exception:
+        pass
+
+    return None
 
 
 def tanimoto_alert(smiles, smiles_map):
@@ -253,11 +269,15 @@ elif page == "🔬  Prédiction IC50":
     col_in, col_out = st.columns([1, 1])
 
     EXAMPLES = {
-        "Afatinib (EGFR inhibitor)": "CN(C)C/C=C/C(=O)NC1=C(C=C2C(=C1)C(=NC=N2)NC3=CC(=C(C=C3)F)Cl)OCC4CCCO4",
-        "BRI-46 (généré — top candidat)": "O=S(=O)(c1ccc2ccccc2c1)N1CCNCC1",
-        "BRI-12 (généré — SA=1.68)": "NS(=O)(=O)c1ccc(-c2cccc(O)c2)cc1",
-        "Gra-1 (GraphGA #1, QED=0.872)": "CN1CCCN(C2CC2)CC(c2ccccc2NCCO)C1",
-        "Imatinib (Gleevec — référence)": "Cc1ccc(NC(=O)c2ccc(CN3CCN(C)CC3)cc2)cc1Nc1nccc(-c2cccnc2)n1",
+        "Imatinib / Gleevec (BCR-ABL)":    "Cc1ccc(NC(=O)c2ccc(CN3CCN(C)CC3)cc2)cc1Nc1nccc(-c2cccnc2)n1",
+        "Gefitinib (EGFR inhibitor)":       "COc1cc2ncnc(Nc3ccc(F)c(Cl)c3)c2cc1OCCCN1CCOCC1",
+        "Erlotinib (EGFR inhibitor)":       "COCCOc1cc2ncnc(Nc3cccc(Cl)c3)c2cc1OCCOC",
+        "Vemurafenib (BRAF inhibitor)":     "CCCS(=O)(=O)Nc1ccc(F)c(C(=O)c2ccc(Cl)cc2)c1",
+        "BRI-46 (généré — top candidat)":   "O=S(=O)(c1ccc2ccccc2c1)N1CCNCC1",
+        "BRI-12 (généré — SA=1.68)":        "NS(=O)(=O)c1ccc(-c2cccc(O)c2)cc1",
+        "BRI-58 (généré — proche GW441756)":"O=C1Nc2cccnc2N(CCO)c2ccccc21",
+        "Gra-1 (GraphGA #1, QED=0.872)":    "CN1CCCN(C2CC2)CC(c2ccccc2NCCO)C1",
+        "Aspirine (référence simple)":      "CC(=O)Oc1ccccc1C(=O)O",
     }
 
     with col_in:
