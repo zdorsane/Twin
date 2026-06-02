@@ -215,7 +215,56 @@ La voie la plus prometteuse à court terme est **XGBoost avec features omiques a
 
 ---
 
-## 6. Limitations connues et mises en garde
+## 6. Interprétation des figures principales
+
+Les figures suivantes résument visuellement les résultats, les risques et les priorités du projet. Elles permettent à un expert du domaine de comprendre rapidement ce qui a été fait, et pourquoi les conclusions restent prudentes.
+
+### Figure 01 — Structures moléculaires des candidats GraphGA
+- Montre les 10 meilleures molécules générées par GraphGA.
+- Confirme visuellement la présence de scaffolds hétérocycliques et de motifs sulfonamide, pipérazine et carbamate.
+- Interprétation : ces structures sont chimiques plausibles et compatibles avec une synthèse de chimie médicinale, mais elles restent suffisamment originales pour ne pas être des analogues proches de CCLE.
+
+### Figure 02 — Courbes d'entraînement QSAR
+- Affiche la RMSE d'entraînement et de validation, ainsi que Pearson r par epoch.
+- Interprétation : le modèle performe bien sur le split random, mais la validation LDO montre une divergence croissante après 2–3 epochs, indiquant un surapprentissage sur des drogues vues.
+- Conséquence : le meilleur checkpoint doit être sélectionné en priorité sur LDO, pas sur le split random.
+
+### Figure 03 — Reward BRICS-DQN sur 5 000 épisodes
+- Montre l'évolution de la récompense de l'agent DQN pendant l'entraînement.
+- Interprétation : le signal de reward augmente de façon significative, ce qui montre que l'agent apprend des fragments BRICS utiles.
+- Limite : une récompense plus élevée ne garantit pas la validité chimique, d'où le besoin de la validation par PAINS/Brenk et SA.
+
+### Figure 04 — Distribution QED et propriétés Lipinski
+- Compare QED, poids moléculaire et logP des candidats GraphGA.
+- Interprétation : la majorité des candidats se situe dans une zone acceptable de druglikeness (QED > 0.7, MW < 500, logP modéré), renforçant leur attractivité pour une phase de screening précoce.
+
+### Figure 05 — Dashboard synthétique
+- Résume en une seule image les métriques clés : performance QSAR, reward DQN, scores QED, validité, et principales alertes.
+- Interprétation : ce tableau de bord confirme la cohérence des pipelines et met en évidence les compromis entre originalité, synthétisabilité et prédictions IC50.
+
+### Figure 06 — Distribution Tanimoto vs CCLE
+- Montre la similarité maximale des candidats générés par rapport aux drogues CCLE.
+- Interprétation : presque tous les candidats ont une similarité < 0.30, ce qui signifie qu'ils explorent un espace moléculaire nouveau par rapport à l'entraînement.
+- Ce résultat est crucial : il valide la génération de composés innovants, mais il renforce également l'incertitude liée aux prédictions IC50 hors distribution.
+
+### Figure 07 — Ablation LDO (Bi-Int vs baselines)
+- Compare les performances LDO du Bi-Int et des modèles de référence (XGBoost, Ridge, RF, etc.).
+- Interprétation : le Bi-Int reste sous-optimal face à XGBoost en LDO, ce qui oriente les efforts d'amélioration vers la régularisation, l'augmentation de données et l'optimisation du split.
+- Message pour l'expert : le modèle profond n'est pas encore suffisamment robuste pour remplacer une baseline bien calibrée en hors-distribution.
+
+### Figure 08 — Heatmap de diversité interne
+- Montre la similarité Tanimoto entre toutes les molécules générées.
+- Interprétation : la bibliothèque est très diverse (Tanimoto moyen ≈ 0.10), ce qui est un atout pour le screening et réduit les redondances.
+- Limite : une diversité trop élevée peut aussi signifier un manque de focus autour de cibles pharmaceutiques bien connues, donc il faut équilibrer originalité et réalisme chimique.
+
+### Figure 13 — Applicability domain
+- Montre le domaine d'applicabilité du modèle sur les molécules d'entraînement vs nouvelles molécules.
+- Interprétation : les composés hors domaine doivent être traités avec prudence, car le modèle n'a pas de garantie de performance en dehors de l'espace chimique appris.
+- Recommandation : utiliser cette figure pour établir un seuil d'alerte dans les futures exportations de candidats.
+
+---
+
+## 7. Limitations connues et mises en garde
 
 | Limitation | Impact | Mitigation |
 |-----------|--------|-----------|
