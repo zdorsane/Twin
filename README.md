@@ -27,7 +27,8 @@
 | Random | Bi-Int (epoch 4) | **0.811** | [0.736, 0.886] | Optimistic — same drugs in train/val |
 | Leave-Drug-Out | **XGBoost** | **0.367** | [0.338, 0.393] | Best model on honest split |
 | Leave-Drug-Out | Bi-Int (epoch 2) | 0.316 | [0.287, 0.344] | Deep model, honest metric |
-| Leave-Drug-Out | Ridge ECFP4+omics | 0.228 | [0.196, 0.256] | Classical baseline |
+| Leave-Drug-Out | MLP (ECFP4+omics) | 0.349 | — | Classical baseline |
+| Leave-Drug-Out | Ridge ECFP4+omics | 0.286 | — | Classical baseline |
 | Leave-Cell-Out | Bi-Int (epoch 4) | 0.766 | — | Partial run (6 epochs) |
 
 > Random split r = 0.811 measures interpolation, not generalisation. LDO is the honest metric.
@@ -56,13 +57,15 @@
 | ![Training curves](figures/phase1_training_generation/02_training_curves.png) | ![Dashboard](figures/phase1_training_generation/05_dashboard.png) |
 | *Fig 02 — Bi-Int training curves (random split, 4 epochs, r=0.811 at epoch 4)* | *Fig 05 — Full results dashboard* |
 | ![Tanimoto](figures/phase2_validation_ablation/06_tanimoto_distribution.png) | ![Diversity](figures/phase2_validation_ablation/08_internal_diversity.png) |
-| *Fig 06 — All candidates have Tanimoto < 0.30 vs CCLE drugs — structurally novel* | *Fig 08 — Internal similarity heatmap (60 candidates, diversity = 0.90)* |
+| *Fig 06 — All candidates Tanimoto < 0.30 vs CCLE drugs — structurally novel* | *Fig 08 — Internal similarity heatmap (60 candidates, diversity = 0.90)* |
 | ![ncRNA](figures/phase3_interpretability_reliability/09_ncrna_importance.png) | ![Coding](figures/phase3_interpretability_reliability/11_coding_biomarkers.png) |
-| *Fig 09 — ncRNA importance (Gradient×Input). H19 rank 61/76, GAS5 rank 70/76* | *Fig 11 — Coding gene importance. 0/20 canonical oncology markers in top-20 (LDO checkpoint)* |
+| *Fig 09 — ncRNA importance (Gradient×Input, LDO val). H19 rank 61/76, GAS5 rank 70/76* | *Fig 11 — Coding gene importance. 0/20 canonical oncology markers in top-20* |
 | ![Uncertainty](figures/phase3_interpretability_reliability/12_uncertainty_distribution.png) | ![AppDomain](figures/phase3_interpretability_reliability/13_applicability_domain.png) |
-| *Fig 12 — MC Dropout: 5.5% high-uncertainty pairs. Model overconfident at 10% dropout* | *Fig 13 — 80% of novel drugs are out-of-applicability-domain (Tanimoto < 0.4)* |
+| *Fig 12 — MC Dropout σ distribution. 5.5% high-uncertainty (dropout=10%, N=30)* | *Fig 13 — 80% of LDO val drugs are out-of-applicability-domain (Tanimoto < 0.4)* |
 
-See [docs/FIGURE_INTERPRETATIONS.md](docs/FIGURE_INTERPRETATIONS.md) for expert-level interpretation of all 13 figures.
+> Figures 01–08 are in `figures/phase1_training_generation/` and `figures/phase2_validation_ablation/`.  
+> Figures 09–13 are in `figures/phase3_interpretability_reliability/`.  
+> See [docs/FIGURE_INTERPRETATIONS.md](docs/FIGURE_INTERPRETATIONS.md) for expert-level interpretation of all figures.
 
 ---
 
@@ -168,6 +171,18 @@ Twin/
     ├── session_report_2026-06-01.md # Session report 1 June 2026
     └── [other dated reports]
 ```
+
+---
+
+## Scientific narrative — the negative result that matters
+
+The central finding of this project is a **net negative result on LDO, and it is fully intentional**.
+
+On random split, Bi-Int reaches r = 0.811 — competitive with published CCLE models. On Leave-Drug-Out (the only honest metric), it falls to r = 0.316, **below XGBoost (r = 0.367) and MLP (r = 0.349)**. Most pharmacogenomics papers do not report LDO at all, hiding this exact failure behind inflated random-split numbers.
+
+**What this diagnoses:** ECFP4 fingerprints encode drug *identity*, not structural *similarity*. In LDO regime, when the drug was never seen, fixed fingerprints carry no pharmacological information — they become noise. The GNN encoder, pre-trained on ChEMBL, should recognise pharmacophoric sub-structures even in novel molecules. It does not yet outperform XGBoost at 16k training triplets.
+
+**The decisive test:** with the full 103k triplets + early stopping + L2 regularisation, the ChEMBL-pretrained GNN must beat XGBoost on LDO. If it does, the deep architecture is justified. If it does not, the bottleneck is data scale, not architecture. This is the open question that drives all future work.
 
 ---
 

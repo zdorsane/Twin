@@ -106,15 +106,24 @@ Tous les Pearson r sont accompagnés d'**intervalles de confiance à 95% par boo
 | Split | Modèle | Pearson r | IC 95% |
 |-------|--------|-----------|--------|
 | Random | Bi-Int | **0.811** | [0.736 – 0.886] |
-| LDO | Bi-Int | **0.316** | [0.241 – 0.391] |
-| LDO | XGBoost (meilleure baseline) | **0.367** | [0.338 – 0.393] |
+| Random | MLP (ECFP4+omics) | 0.881 | — |
+| Random | XGBoost | 0.849 | — |
+| **LDO** | **XGBoost (meilleure baseline)** | **0.367** | [0.338 – 0.393] |
+| **LDO** | **MLP (ECFP4+omics)** | **0.349** | — |
+| **LDO** | **Bi-Int** | **0.316** | [0.241 – 0.391] |
+| **LDO** | Ridge (ECFP4+omics) | 0.286 | — |
 | LCO | XGBoost | **0.824** | — |
+| LCO | Bi-Int (partiel, 6 epochs) | 0.766 | — |
+
+> ⚠️ **Les lignes LDO sont les seules métriques honnêtes.** En LDO, Bi-Int (r=0.316) est troisième derrière MLP (0.349) et XGBoost (0.367). Ce classement est le point de départ du raisonnement, pas son point d'arrivée.
 
 ### Ce que cela signifie honnêtement
 
-- **r = 0.811 en random** : excellent, compétitif avec les meilleures publications CCLE (fourchette publiée : 0.70–0.85). Mais c'est l'évaluation flatteuse.
-- **r = 0.316 en LDO** : faible, mais **statistiquement significatif** (p << 0.001, n > 10 000 triplets). Le modèle apprend quelque chose de réel sur la structure-activité.
-- **XGBoost bat Bi-Int en LDO (0.367 vs 0.316)** : nous le disons explicitement. La complexité du deep learning ne se justifie pas encore à l'échelle actuelle de données. C'est la limite centrale que nos prochains développements visent à dépasser.
+- **r = 0.811 en random** : compétitif avec les publications CCLE (fourchette 0.70–0.85), mais ce chiffre mesure la **mémorisation**, pas la généralisation. Il ne sera pas cité comme performance principale en soutenance.
+- **r = 0.316 en LDO** : faible, mais **statistiquement significatif** (p << 0.001, n > 10 000 triplets). C'est notre métrique honnête — la seule qui correspond à l'usage réel.
+- **XGBoost bat Bi-Int en LDO (0.367 vs 0.316)** : c'est un **résultat négatif net, et nous l'assumons pleinement**. Il n'est pas présenté comme un échec mais comme une **contribution scientifique** : nous avons quantifié et exposé l'artefact de mémorisation des fingerprints fixes (ECFP4) sur données CCLE — là où la majorité des publications évaluées sur random split passent ce problème sous silence. Ce diagnostic est la première étape nécessaire pour concevoir des solutions.
+
+> **À annoncer soi-même devant le jury, avant qu'on le pose :** *"Sur le seul test honnête — Leave-Drug-Out — notre modèle deep learning obtient r = 0.316, sous XGBoost à r = 0.367. Nous l'exposons explicitement parce que c'est précisément ce résultat qui motive l'architecture future."*
 
 ---
 
@@ -128,6 +137,8 @@ Tous les Pearson r sont accompagnés d'**intervalles de confiance à 95% par boo
 ```
 Score = QED (drug-likeness) + SA (accessibilité synthétique) + IC50_prédit_Bi-Int
 ```
+
+> ⚠️ **Limite explicite à présenter au jury :** la composante IC50_prédit est calculée par l'oracle Bi-Int sur des molécules nouvelles — exactement le régime LDO où ce modèle obtient r = 0.316. Les candidats sont donc classés par **chimie validée** (QED, SA, filtres MedChem) — pas par potency anticancéreuse prouvée. Ils sont présentés comme **molécules valides et originales à valider expérimentalement**, pas comme candidats anticancer démontrés.
 
 **Résultat :** 10 candidats top, tous Lipinski-compliant, QED moyen = 0.833 (supérieur à la médiane des médicaments approuvés ChEMBL = 0.67), 0 alerte PAINS.
 
@@ -238,9 +249,24 @@ Un jury de startup sait reconnaître un fondateur qui connaît ses angles morts.
 
 ---
 
+## PARTIE 9 — FIL DIRECTEUR SCIENTIFIQUE : le test décisif à venir
+
+**Saber Marouane (reviewer externe) formule le fil directeur ainsi :**
+
+> *"Votre vraie future work est là : remplacer les fingerprints fixes par une représentation apprise (GNN, dans l'esprit de MolCLR et de votre pré-entraînement ChEMBL). Si elle bat XGBoost en LDO, l'approche deep devient justifiée. C'est le fil directeur de votre projet."*
+
+**En termes techniques :** les baselines XGBoost et Ridge utilisent des fingerprints ECFP4 — vecteurs binaires fixes qui encodent l'**identité** d'une molécule. En régime LDO, quand la drogue n'a jamais été vue, ECFP4 ne transporte aucune information structurale utile. Notre GNN pré-entraîné sur ChEMBL encode au contraire la **structure chimique apprise** — il reconnaît des sous-structures pharmacophores même dans des molécules nouvelles.
+
+**Le test décisif :** sur données complètes (103k triplets, early stopping, dropout renforcé), le GNN doit dépasser XGBoost en LDO. Si oui → l'approche deep est justifiée. Si non → le goulot est la quantité de données, pas l'architecture.
+
+**Formulation pour la soutenance :**
+> *"Notre résultat LDO actuel (r = 0.316 vs XGBoost r = 0.367) n'est pas un échec — c'est un diagnostic. Il indique que, à 20k triplets, XGBoost exploite mieux les corrélations omiques que notre réseau de 9M de paramètres. Le test décisif est clair : sur les 103k triplets complets avec régularisation adaptée, le GNN pré-entraîné sur ChEMBL doit dépasser XGBoost en LDO. Si c'est le cas, l'intégration deep learning se justifie. Nous avons construit l'infrastructure pour répondre à cette question."*
+
+---
+
 ## Phrase de clôture pour le jury
 
-> *"Twin est une plateforme d'intelligence artificielle multimodale qui — pour la première fois — prédit la réponse d'une tumeur à une molécule candidate, génère de nouvelles molécules optimisées chimiquement, explique ses prédictions par des biomarqueurs biologiquement validés, et quantifie honnêtement son incertitude : les trois piliers manquants pour que l'IA devienne un outil cliniquement acceptable en oncologie de précision."*
+> *"Twin ne prétend pas avoir un prédicteur parfait. Il démontre que la rigueur d'évaluation (LDO, bootstrap CI, domaine d'applicabilité) et l'honnêteté sur les limites (résultat négatif assumé, oracle faible signalé) sont les fondations sans lesquelles aucun outil d'IA clinique ne peut être crédible. C'est exactement ce qui manque dans la majorité des publications QSAR actuelles — et ce que Twin met en place."*
 
 ---
 
