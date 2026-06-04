@@ -4,20 +4,38 @@
 
 # Twin — Multimodal QSAR + De Novo Drug Generation on CCLE
 
-> Multimodal drug response predictor (QSAR) + de novo molecule generator on CCLE.  
-> **This is a research prototype, not a medical-grade digital twin.**
+> A research prototype for drug response prediction and molecule generation on CCLE.
+> This repository is intended for computational biology and drug discovery experts.
 
-## TL;DR
+## Executive summary
 
-- Predicts cancer cell-line IC50 from drug SMILES + omics (GEx 978, CNA 426, Mut 735) using a GNN–Quaternion-VAE–Bi-Int fusion model.
-- Best honest performance: **Pearson r = 0.316** (leave-drug-out, 95% CI [0.287–0.344]) — weak but statistically significant.
-- XGBoost outperforms the deep model on LDO (r = 0.367). Deep learning benefit not yet justified at current data scale.
-- Two molecular generators (GraphGA + BRICS-DQN): **38/60 candidates pass all MedChem filters**, internal diversity = **0.90**.
-- New (June 2026): model checkpointing, deterministic VAE inference, Gradient×Input biomarker attribution, MC Dropout uncertainty, Tanimoto applicability domain alerts.
-- IC50 predictions for generated molecules are **out-of-distribution extrapolations** — do not use as reliable potency estimates.
+Twin combines a multimodal drug response model with de novo molecule generation.
+It is built around:
+- a GNN encoder for drug structure,
+- a quaternion VAE for cell omics,
+- a Bi-Interaction fusion module for IC50 prediction.
+
+### Key findings
+
+- The honest evaluation metric is **Leave-Drug-Out (LDO)**.
+- The Bi-Int architecture achieves **Pearson r = 0.316** on LDO.
+- A classical XGBoost baseline still performs better on LDO with **r = 0.367**.
+- Two molecule generators (GraphGA + BRICS-DQN) produce **60 candidates**.
+- **38/60 candidates pass MedChem validation** and overall internal diversity is **0.90**.
+- Reliability diagnostics flag **80% of novel molecules as out of domain** and **5.5% as high uncertainty**.
+
+> This project is a prototype, not a validated clinical system. IC50 estimates for generated molecules are exploratory and require experimental validation.
 
 ---
+## Core contributions
 
+- Honest, multimodal QSAR evaluation on CCLE with drug SMILES and omics fusion.
+- Explicit baseline comparison showing current deep learning limits in leave-drug-out generalisation.
+- Two complementary de novo molecule generation methods with chemical validation.
+- Applicability domain assessment and MC dropout uncertainty metrics for reliability.
+- Reproducible evaluation notebook and figure-driven analysis pipeline.
+
+---
 ## Key results
 
 ### QSAR prediction
